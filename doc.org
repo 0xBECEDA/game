@@ -1,0 +1,1623 @@
+#+STARTUP: showall indent hidestars
+
+* Для чего?
+
+Я задумала написать игрушку, чтоб более-менее разобраться с сетевым
+программированием и си в частности. Плюс написание игры - это своего
+рода интерактив. Сам пишешь, сам наблюдаешь, как код видимо,
+материально меняет происходящее, сам играешь.
+
+* Геймплей
+
+Это многопользовательская сетевая игра.
+
+Игроки управляют ~квадратиками~, которые перемещаются на двухмерном поле, заполненом
+пикселями ~еды~, которую можно есть. ~Квадратик~ игрока увеличивается, когда сьедает
+достаточно ~пикселей~.
+
+Игрок заинтересован в увеличении своего ~квадратика~, потому что больший ~квадратик~
+при столкновении с меньшим сьедает его.
+
+Таким образом, цель игры в том, чтобы стать большим и сьесть всех противников.
+
+* Компоненты
+
+Игра состоит из ~Сервера~ и ~клиентов~. ~Клиентам~ желательно подключиться к серверу
+при старте, т.к. тот кто играет дольше, получает преимущество в размере ~квадратика~.
+
+** Сервер
+
+За геймплей отвечает ~Сервер~. Он создает ~пиксели еды~, подсчитывает
+съеденные пиксели путем сопоставления их координат с координатами героя и врага,
+увеличение квадратиков и пересылает пакеты от клиента к клиенту.
+
+Сервер хранит состояние поля игры и принимает от игроков сообщения, которые содержат
+информацию о перемещении квадратиков.
+
+Состояние игры на сервере представляет собой:
+- размер поля по горизотали и вертикали
+- массив ~пикселей еды~, которую можно есть
+- массив структур игроков
+
+#+NAME: srv_game
+#+BEGIN_SRC forth :tangle game_server.c :noweb tangle :exports code :padline no :comments none
+  <<srv_libs>>
+  <<field_constants>>
+  <<srv_constants>>
+  <<srv_globals>>
+  <<server_deserial_and_serial_declaration>>
+  <<numpix_declaration>>
+  <<srv_pixel_array>>
+  <<srv_deserialization>>
+  <<srv_serialization>>
+  <<counter>>
+  <<thread>>
+  <<srv_main>>
+#+END_SRC
+
+*** Подключаемые библиотеки
+
+#+NAME: srv_libs
+#+BEGIN_SRC cpp
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <errno.h>
+#include <linux/unistd.h>
+
+#+END_SRC
+
+*** Размер поля
+
+Размер поля - это константы, которые должны быть общими для клиентов и
+сервера. Но раз уж мы начинаем с сервера, то объявим их тут:
+
+#+NAME: field_constants
+#+BEGIN_SRC cpp :noweb yes
+
+  /* Размер поля по горизонтали */
+  #define MAX_SIZE_X 500
+
+  /* Размер поля по вертикали */
+  #define MAX_SIZE_Y 500
+#+END_SRC
+
+*** Пиксели еды
+
+Чтобы за едой пришлось побегать, я ограничиваю количество пикселей константой
+~MAX_PIXELS~ и объявляю глобальный массив пикселей ~pixels~:
+
+#+NAME: srv_constants
+#+BEGIN_SRC cpp :noweb yes
+
+  /* максимальное кол-во пикселей еды на поле */
+  #define MAX_PIXELS 100
+  <<srv_constants_maxline>>
+#+END_SRC
+
+Каждый пиксель из массива ~пикселей еды~ имеет координаты и поле ~alive~, которое
+показывает, сьеден ли он:
+
+#+NAME: srv_globals
+#+BEGIN_SRC cpp :noweb yes
+  /* объявление структуры и массива пикселей */
+  struct pixel {
+      char alive;
+      int c;
+      int d;
+  } pixels[MAX_PIXELS];
+
+  <<srv_globals_indx>>
+#+END_SRC
+
+Теперь можно сгенерировать еду для игроков.
+
+Я хочу перебрать массив структур пикселей, и для каждой структуры проверить поле
+~alive~. Если оно содержит ~ноль~ - это значит, что пиксель был сьеден, а значит мы
+можем воспользоваться его местом в массиве, чтобы сгенерировать новый пиксель и сразу
+выйти из цикла. Таким образом мы генерируем один новый пиксель за раз, если для него
+есть свободное место в массиве пикселей.
+
+#+NAME: pixel_array_loop
+#+BEGIN_SRC cpp :noweb yes
+  for (i=0; i<MAX_PIXELS; i++) {
+      if (0 == pixels[i].alive) {
+          /*сгенерируем пиксели */
+          <<generate_new_pixel>>
+      }
+  }
+#+END_SRC
+
+Генерация нового пикселя не так проста, как кажется. Наивный способ сделать новый
+пиксель - это взять случайные значения координат. Но что если там уже есть живой
+(alive) пиксель? В этом случае мы должны получить новые случайные значения:
+
+#+NAME: generate_new_pixel
+#+BEGIN_SRC cpp :noweb yes
+  int a;
+  int b;
+    generate_new_pixel:
+
+     a = rand() % MAX_SIZE_X;
+     b = rand() % MAX_SIZE_Y;
+
+    if ((a == pixels[i].c) && (b == pixels[i].d)) {
+        goto generate_new_pixel;
+    }
+
+    pixels[i].c = a;
+    pixels[i].d = b;
+    pixels[i].alive = 1;
+#+END_SRC
+
+Теперь обернем полученное в функцию:
+
+#+NAME: srv_pixel_array
+#+BEGIN_SRC cpp :noweb yes
+  /* процедура генерации одного нового пикселя еды */
+  int PixelArray (void *p_pixels) {
+      /* счетчик цикла, объявляется вне цикла, чтобы проанализировать
+         пройден ли весь массив */
+      int i;
+      <<pixel_array_loop>>
+
+      /* Если после окончания цикла i равен максимальному значению
+         переменной цикла - значит весь массив перебрали,
+         но не нашли свободной структуры */
+      if ( MAX_PIXELS >= i ) {
+          return -1;
+
+      } else {
+          return 0;
+      }
+  }
+#+END_SRC
+
+*** Структуры игроков
+
+Также, как и с пикселями, я ограничиваю кол-во клиентов константой ~MAX_CLIENTS~:
+
+#+NAME: srv_constants_clients
+#+BEGIN_SRC cpp :noweb yes
+
+  /* максимальное кол-во подключенных клиентов */
+  #define MAX_CLIENTS 2
+#+END_SRC
+
+Для каждого ~клиента~ я определяю структуру ~connection~, которая содержит:
+- Идентификатор потока, в котором отправляются пакеты от этого клиента
+- Идентификатор соединения, чтобы отличать одно соединение от другого
+  при получении данных
+- Указатель на структуру ~sockaddr_in~ клиента
+- Буфер, куда будут записываться данные пакета от этого кдиента
+
+Используя эту структуру я объявляю глобальный массив клиентов:
+
+#+NAME: srv_globals_connection
+#+BEGIN_SRC cpp :noweb yes
+
+  /* объявление структуры и массива клиентов */
+  struct connection {
+      int thread;
+      int ident;
+      struct sockaddr_in *p;
+      char *buf;
+  } clients[MAX_CLIENTS];
+#+END_SRC
+
+*** Сервер подключений
+
+Теперь, когда есть куда поместить клиентов, можно написать код,
+который будет принимать подключения. Сервер и клиенты будут общаться по UDP.
+
+Мне понадобится:
+- Счетчик в массиве структур клиентов, чтобы он не переполнялся
+- Процедура записи нового клиента в массив клиентов
+- Сокет, который будет слушать сервер
+- Процедуры сериализации и десериализации принимаемых пакетов
+- Код, который принимает UDP-датаграммы и разбирает их
+
+Для начала нужен счетчик, чтобы заполнить следующую ячейку массива клиентов, если мы
+обнаружили датаграмму с идентификатором нового клиента. Я назову его ~client_idx~ и
+сначала он будет указывать на первый элемент массива:
+
+#+NAME: srv_globals_indx
+#+BEGIN_SRC cpp :noweb yes
+  <<srv_globals_connection>>
+
+    /* индекс следующего клиента */
+  int new_client_idx = 0;
+#+END_SRC
+
+Во-избежание всяких проблем, стоит также определить функцию, которая будет заполнять
+следующий элемент массива клиентов, если в этом массиве еще осталось
+место. Она будет принимать структуру клиента и возвращать ~false~
+если массив исчерпан (ошибка) или ~true~ если все прошло успешно:
+
+#+NAME: set_new_client
+#+BEGIN_SRC cpp
+  /* регистрация нового клиента */
+  int set_new_client (struct connection client) {
+      if ( new_client_idx >= MAX_CLIENTS ) {
+          return 0; // error
+
+      } else {
+          clients[new_client_idx] = client;
+          new_client_idx++;
+          return 1; // success
+      }
+  }
+#+END_SRC
+
+Теперь можно приступить к созданию сокета, но сначала определим порт, который будет
+слушать сервер:
+
+#+NAME: srv_constants_port
+#+BEGIN_SRC cpp :noweb yes
+
+  /* порт сервера */
+  #define PORT     8080
+  <<srv_constants_clients>>
+
+#+END_SRC
+
+Также важно определить максимальный размер датаграммы:
+
+#+NAME: srv_constants_maxline
+#+BEGIN_SRC cpp :noweb yes
+  <<srv_constants_port>>
+  /* максимальный размер датаграммы */
+  #define MAXLINE  1220
+
+#+END_SRC
+
+Мы будем иcпользовать промежуточный буфер размером с максимально возможную датаграмму,
+чтобы анализировать полученные из сети данные. Эту переменную в будущем стоит сделать
+локальной и передавать явно как параметр (TODO).
+
+#+NAME: srv_globals_buf_maxline
+#+BEGIN_SRC cpp :noweb yes
+  /* объявляем промежуточный буфер */
+  char buffer[MAXLINE];
+
+#+END_SRC
+
+Нам также понадобится структура ~sockaddr_in~ для сервера
+
+#+NAME: srv_globals_sockaddr_servaddr
+#+BEGIN_SRC cpp :noweb yes
+  <<srv_globals_buf_maxline>>
+  /* sockaddr_in сервера */
+  struct sockaddr_in servaddr;
+
+#+END_SRC
+
+И такая же структура, в которую функция ~recvfrom~ сохранит данные об отправители
+датаграммы:
+
+#+NAME: srv_globals_sockaddr_cliaddr
+#+BEGIN_SRC cpp :noweb yes
+  <<srv_globals_sockaddr_servaddr>>
+  /* sockaddr_in клиента */
+  struct sockaddr_in cliaddr;
+
+#+END_SRC
+
+Еще нам понадобится переменная для хранения идентификатора сокета
+сервера.
+
+#+NAME: srv_globals_sockfd
+#+BEGIN_SRC cpp :noweb yes
+  <<srv_globals_sockaddr_cliaddr>>
+  int sockfd;
+
+#+END_SRC
+
+И массив структур типа sockaddr_in, чтоб хранить в нем данные
+структур cliaddr, чтоб иметь возможность обращаться к двум разным
+клиентам в любой момент времени, поскольку структура cliaddr
+перезаписывается автоматически, как только приходит пакет от
+какого-либо из клиентов, а данные предыдущего клиента затираются.
+
+#+NAME: srv_globals_dub_array
+#+BEGIN_SRC cpp :noweb yes
+  <<srv_globals_sockfd>>
+  /*массив для хранения данных структур cliaddr*/
+  struct sockaddr_in dub_array[2];
+#+END_SRC
+
+Инициализируем счетчик-индекс для dub_array. Он понадобится нам в
+будущем для записи в свободную ячейку массива
+
+#+NAME: dub_array_cnt
+#+BEGIN_SRC cpp :noweb yes
+  <<srv_globals_dub_array>>
+  int cnt = 0;
+
+#+END_SRC
+
+Создаем сокет и связываем его с портом:
+
+#+NAME: init_server_socket
+#+BEGIN_SRC cpp :noweb yes
+
+  <<dub_array_cnt>>
+    /* Создаем сокет. Должны в случае успеха получить его дескриптор */
+
+    if ( (sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0 ) {
+        perror("socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    /* заполняем данные о сервере */
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = INADDR_ANY;
+    servaddr.sin_port = htons(PORT);
+
+    <<memset>>
+
+    /* привязываем сокет к адресу */
+    if ( bind( sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr) ) < 0 ) {
+        perror("bind failed");
+        exit(EXIT_FAILURE);
+    }
+
+#+END_SRC
+
+Заполним наши массивы нулями, чтоб в них не оказалось всякого мусора,
+из-за чего последствия могут быть непредсказуемыми.
+
+#+NAME: memset
+#+BEGIN_SRC cpp
+
+    memset(dub_array, 0, sizeof(dub_array));
+    memset(clients, 0, sizeof(clients));
+
+#+END_SRC
+
+Окей, сокет создан и готов принимать UDP-датаграммы. Теперь мы можем написать
+бесконечный цикл, в котором сервер будет:
+- генерировать новые пиксели еды, если это возможно
+- читать из сокета, разбирать полученное и обрабатывать его
+
+#+NAME: srv_loop
+#+BEGIN_SRC cpp :noweb yes
+  while (1) {
+      /* Создаем новые пиксели еды если есть возможность */
+      void * pixels = &pixels;
+      PixelArray(&pixels);
+
+      /* Читаем датаграмму */
+      int len = sizeof(cliaddr);
+      int n = recvfrom( sockfd, buffer, MAXLINE,
+                       MSG_WAITALL, ( struct sockaddr *) &cliaddr,
+                       &len );
+
+      /* передаем указатель на массив c данными структур cliaddr */
+      struct sockaddr_in *pnt = dub_array;
+
+      /* Разбираем датаграмму и пересылаем изменения остальным клиентам */
+      <<datagramm_parse>>
+  }
+#+END_SRC
+
+Перед тем как погружаться в анализ датаграммы, объединим создание сокета и бесконечный
+цикл в функицю ~main~:
+
+#+NAME: srv_main
+#+BEGIN_SRC cpp :noweb yes
+  int  main() {
+      <<init_server_socket>>
+      <<srv_loop>>
+  }
+#+END_SRC
+
+Теперь приступим к обработке датаграммы:
+1. Сначала мы вытащим идентификатор из буфера, чтобы проверить, был ли этот клиент.
+
+#+NAME: ident_parse
+#+BEGIN_SRC cpp
+
+  /* вытаскиваем идентификатор */
+  int ident_client = *(int *)buffer;
+#+END_SRC
+
+2. Затем мы проверим, был ли у нас клиент. Для этого мы сравним
+   идентификатор клиента в каждой структуре с идентификатором из
+   пакета и создадим переменную-счетчик, которая будет увеличиваться
+   каждый раз, если идентификатор из массива структур и идентификатор
+   из буфера совпал. Это является нашей страховкой от записи данных
+   одного и того же клиента в массив структур дважды.
+
+Если был клиент :
+- получаем указатель на область памяти, куда будем копировать данные
+  из пакета клиента
+- копируем данные по указателю
+- на всякий случай загружаем тот же указатель в поле clients.buf
+- увеличиваем счетчик найденных клиентов
+- выходим из цикла
+
+#+NAME: check_client_1
+#+BEGIN_SRC cpp :noweb yes
+
+  for(int i = 0; i<=1; i++) {
+      int counter = 0;
+
+      /*если идентификатор совпадает*/
+      if( clients[i].ident == ident_client) {
+          char *point = clients[i].buf;
+          //printf("char *p, если ident совпал  %X\n", point);
+          memcpy(point, buffer, MAXLINE);
+          clients[i].buf = point;
+          counter++;
+          break;
+      }
+
+      <<check_client_2>>
+  }
+#+END_SRC
+
+Если клиент новый:
+- записываем идентификатор из пакета
+- выделяем память под буфер
+- перезаписываем туда данные
+- копируем указатель на буфер
+- создаем поток
+- кладем идентификатор потока
+- копируем данные структуры cliaddr в массив dub_array
+- копируем указатель на текущий элемент массива dub_array
+- увеличиваем этот указатель на размер его типа
+- сдивгаем индекс массива dub_array, чтоб писать в него данные
+  структур cliaddr при необходимости дальше
+
+Вопрос! Зачем так париться с двумя разными счетчиками массивов,
+массивом dub_array и так далее?
+
+Ответ:
+Путем проб и ошибок я нашла хак, как копировать данные из структуры
+типа sockaddr_in куда-то еще. Зачем мне их вообще копировать? Потому что
+содержимое структуры cliaddr постоянно меняется, а мне надо как-то
+запоминать "технические" данные клиента (вроде порта).
+
+Поэтому структура клиента содержит поле, представляющее собой указатель на
+структуру типа sockaddr_in. Сначала данные из cliaddr грузятся в
+массив dub_array, затем я получаю указатель на конкретный элемент
+массива, затем гружу его в соответствуещее поле структуры
+клиента. Таким образом к каждому клиенту оказывается привязан
+конкретный элемент массива dub_array, который представляет собой
+структуру типа sockaddr_in. Прошу тебя здесь ничего не менять,
+поскольку я перепробовала массу вариантов, поскольку придумать это
+было сложно и заняло много времени.
+
+#+NAME: check_client_2
+#+BEGIN_SRC cpp :noweb yes
+
+  /*если структура пустая и счетчик нулевой*/
+  if( ( clients[i].ident == 0 ) && ( counter == 0 ) ) {
+
+      /* то записываем данные клиента в массив */
+      clients[i].ident = ident_client;
+
+      /* выделяем память по буфер и перезаписываем туда данные */
+      char *p = malloc(MAXLINE);
+      memcpy(p, buffer, MAXLINE);
+      clients[i].buf = p;
+
+      <<create_thread>>
+
+      /* кладем идентификатор потока в структуру */
+      clients[i].thread = udp_thread;
+
+      /* копируем данные структуру клиента в массив */
+      dub_array[cnt] = cliaddr;
+
+      clients[i].p = pnt;
+      printf("pnt of struct is %X\n", pnt);
+      printf("clients[i].p is %X\n", clients[i].p);
+      printf ("clients[i].ident is %d\n", clients[i].ident);
+      fflush(stdout);
+
+      pnt += 1;
+      cnt++;
+      break;
+  }
+#+END_SRC
+
+Здесь будет привычное создание потока
+
+#+NAME: create_thread
+#+BEGIN_SRC cpp
+
+   void* pointer = NULL;
+
+    /* переменная для хранения идентификатора потока */
+    pthread_t udp_thread;
+
+    /* создаем поток */
+    pthread_create(&udp_thread, NULL,
+                   udp_socket, pointer);
+
+#+END_SRC
+
+
+Таким образом парсинг датаграммы будет выглядеть следующим образом:
+
+#+NAME: datagramm_parse
+#+BEGIN_SRC cpp :noweb yes
+
+  <<ident_parse>>
+
+  <<check_client_1>>
+
+#+END_SRC
+
+*** TODO Фукнция потока
+
+Каждому клиенту будет соответствовать свой поток. Зачем? В случае,
+если клиентов планируется два, как у нас, то немного подождать в
+очереди - не проблема. А если клиентов тысяча/две/десять? Вот поэтому
+мы и делаем один поток на каждого.
+
+Функция потока на вервере будет делать следующие вещи:
+
+- разыскивать клиента, чей идентификатор не совпадает с текущим
+- получать указатель на буфер с данными текущего клиента
+- вызывать функцию, которая дополнит и/или изменит данные в буфере
+- отправлять пакет
+
+Прежде чем писать функцию потока надо разобраться с ее
+составляющими. В частности, c подпунктом "вызывать функцию,
+которая дополнит и/или изменит данные в буфере".
+
+Что это мы собираемся с данными, а?
+Как было сказано выше, за генерацию и выявление съеденных пикселей у
+нас отвечает сервер.
+Значит, функция должна:
+- десериализовать данные из пакета( как иначе мы поймем, где находится
+  квадрат и насколько он большой?)
+- пройтись по массиву пикселей и сравнить их координаты с координатами
+  квадрата (так мы поймем, не съели ли пиксель)
+- увеличить стороны квадрата, если пиксель съеден
+- сериализовать данные обратно, добавив к ним данные пикселей-еды
+- вернуть указатель на измененный буфер
+
+Приступим к функциям сериализации и десериализации. Сначала
+декларируем их, чтоб компилятор не возмущался.
+
+
+#+NAME: server_deserial_and_serial_declaration
+#+BEGIN_SRC cpp
+
+void * serialization(char * input, int x, int y, int x_side,
+                     int y_side);
+void deserialization (void * input, int x, int y, int x_side,
+                      int y_side);
+#+END_SRC
+
+Итак, обе эти функции принимают в качестве параметров указатель на
+буфер, переменные, в которые будут записаны координаты квадрата и
+размер его сторон. Только функция сериализации будет возвращать
+указатель, а функция десериализации - нет.
+
+Сначала пропустим идентификатор, затем десериализуем координаты
+квадратика и размер его сторон.
+
+#+NAME: srv_deserialization
+#+BEGIN_SRC cpp
+  void deserialization(void * input, int x, int y, int x_side,
+                       int y_side) {
+
+      void * buffer = input;
+      /*пропускаем идентификатор*/
+      buffer += sizeof(int);
+
+      /*десериаизуем координаты*/
+      x = *(int *)buffer;
+      // printf("in deserial int c %d\n", c);
+      buffer += sizeof(int);
+      y =  *(int *)buffer;
+      buffer += sizeof(int);
+
+      /*десериализуем размер сторон*/
+      x_side = *(int *)buffer;
+      buffer += sizeof(int);
+      y_side = *(int *)buffer;
+      buffer += sizeof(int);
+
+  }
+
+#+END_SRC
+
+А теперь напишем сериализацию. Ее мы бужем вызывать после того, как
+все обсчитаем.
+
+Сначала мы сдвинем указатель на буфер так, чтоб при записи данных не
+затереть идентификатор клиента. Затем териализуем данные координат и
+сторон квадратика и дополним буфер данными пикселей. Ну и вернем
+указатель, конечно.
+
+#+NAME: srv_serialization
+#+BEGIN_SRC cpp
+void * serialization(char * input, int x, int y, int x_side,
+                     int y_side) {
+
+        /* сохраняем неизмененный указатель на буфер */
+        char *pointer = input;
+        printf("pointer in serial %X\n", pointer);
+        /*пропускаем идентификатор*/
+        void *pnt =  (void*)input + sizeof(int);
+        printf("pnt in serial %X\n", pnt);
+
+        /*перезаписываем данные координат и сторон */
+        memcpy(pnt, &x, sizeof(x));
+        pnt += sizeof(x);
+        memcpy(pnt, &y, sizeof(y));
+        pnt += sizeof(y);
+
+        memcpy(pnt, &x_side, sizeof(x_side));
+        pnt += sizeof(x_side);
+        memcpy(pnt, &y_side, sizeof(y_side));
+        pnt += sizeof(y_side);
+
+        /*дополняем данными пикселей*/
+        for (int i = 0; i <=99; i++) {
+
+            *(char*)pnt = pixels[i].alive;
+            pnt += sizeof(char);
+            *(char*)pnt = pixels[i].c;
+            pnt += sizeof(char);
+            *(char*)pnt = pixels[i].d;
+            pnt += sizeof(char);
+        }
+        return pointer;
+    }
+
+#+END_SRC
+
+Done. Теперь займемся обсчетом. Сначала заведем переменную, которая
+будет нам показывать, сколько пикселей съедено всего за время игры. На
+каждом третьем пикселе мы будем увеличивать размер сторон квадратика.
+
+#+NAME: numpix_declaration
+#+BEGIN_SRC cpp
+
+int numpix = 0;
+
+#+END_SRC
+
+Теперь о проходе по массиву. На каждой итерации цикла мы проверяем, не
+находится ли координаты пикселя внутри координат квадратика. Если
+находятся, то пиксель мы помечаем как схеденный, увеличиваем счетчик
+съеденных пикселей и при необходимости увеличиваем размер сторон
+квадратика.
+
+#+NAME: count_loop
+#+BEGIN_SRC cpp
+
+for (int i= 0; i <= 99; i++) {
+        /*если пиксель находится внутри квадрата*/
+        if(pixels[i].c <= x + (x_side - 1) &&
+           pixels[i].c > x &&
+           pixels[i].d <= y + (y_side - 1) &&
+           pixels[i].d >= y) {
+            /*то мы объявляем его как съеденный*/
+            pixels[i].alive = 0;
+
+            /*увеличиваем счетчик съеденных пикселей*/
+            numpix++;
+
+            /*на каждом третьем пикселе квадрат увеличивается
+              Пора увеличить?*/
+            int result =  numpix % 3;
+            if (result == 0) {
+
+                /* горизонталь и диагональ увеличиваются на 1*/
+                x_side++;
+                y_side++;
+
+            }
+        }
+    }
+
+#+END_SRC
+
+Теперь мы можем собрать все это добро в функцию-считалку, как
+конструктор.
+
+
+#+NAME: counter
+#+BEGIN_SRC cpp :noweb yes
+
+  void * counter (char * input) {
+
+      int x = 0;
+      int y = 0;
+      int x_side = 0;
+      int y_side = 0;
+
+      void  * buffer = (void *)input;
+
+      char *p = input;
+
+      /*десериализуем данные*/
+      deserialization(buffer, &x, &y, &x_side, &y_side);
+
+      <<count_loop>>
+
+      /*сериализуем обратно*/
+      char * pnt;
+      return pnt =  serialization(p, &x, &y, &x_side, &y_side);
+
+  }
+
+#+END_SRC
+
+После всех трудов можно, наконец-то, написать функцию потока,
+которая будет обрабатывать отправку пакетов.
+
+Мы оформим ее в виде бесконечного цикла, который будет разыскивать
+сначала клиента, чей идентификатор совпадает с идентификатором из
+пришедшего пакета, затем получит указатель на буфер этого клиента,
+вызовет функцию-считалку, найдет клиента, чей идентификатор отличен от
+текущего, и отправит ему пакет с измененными данными.
+
+#+NAME: thread
+#+BEGIN_SRC cpp :noweb yes
+  void* udp_socket(void* pointer) {
+      printf("Thread is going\n");
+      while(1) {
+
+          /* получаем идентификатор клиента */
+          void *pnt = pointer;
+          int ident = *(int *)pnt;
+
+          /*заводим структуру, чтоб загрузить в нее сохраненные из cliaddr данные*/
+          struct sockaddr_in dub_client;
+
+          /*заводим структуру, чтоб позже скопировать в нее данные клиента*/
+          struct connection client;
+
+          for (int i = 0; i <=1; i++) {
+
+              /* если идентификатор из буфера совпадает
+                 с идентификатором  клиента */
+
+              if (ident == clients[i].ident) {
+                  /* то получаем указатель на его буфер */
+                  char *p = clients[i].buf;
+
+                  /* и ищем не совпадающий идентификатор */
+                  for (int i = 0; i <=1; i++) {
+                      /* если идентификаторы разные */
+                      if (ident != clients[i].ident &&
+                          clients[i].ident != 0 ) {
+
+                          /* то загружаем сохранненные из структуры cliaddr данные */
+                          client = clients[i];
+                          dub_client = *client.p;
+
+                          /*дополняем буфер данными*/
+                          counter(p);
+
+                          /* отправляем пакет */
+                          int n =  sendto(sockfd, p, MAXLINE,
+                                          MSG_CONFIRM,
+                                          (struct sockaddr *) &dub_client,
+                                          sizeof(cliaddr));
+                      }
+                  }
+              }
+          }
+      }
+  }
+
+#+END_SRC
+
+** Клиент
+
+На клиенте происходит инициализация библиотеки SDL, отрисовка всех визуальных
+элементов игры, мониторинг событий, типа, движения мышки, управления
+героем и т.д.
+
+Итак, начнем с самого необходимого. Сначала подключим все библиотеки,
+которые будут нам нужны.
+
+#+NAME: libraries
+#+BEGIN_SRC cpp
+  #include <SDL2/SDL.h>
+  #include <stdio.h>
+  #include <sys/types.h>
+  #include <sys/socket.h>
+  #include <signal.h>
+  #include <stdbool.h>
+  #include <time.h>
+  #include <unistd.h>
+  #include <linux/unistd.h>
+  #include <pthread.h>
+  #include <errno.h>
+  #include <fcntl.h>
+  #include <netinet/in.h>
+#+END_SRC
+
+Прежде чем работать с SDL надо еe "включить", т.е. в нашем случае
+инициализировать.
+В игре нам точно понадобится окно, его поверхность, на которой мы и
+будем рисовать, и все функции, которые может предложить нам SDL. Зачем
+себя ограничивать, в конце концов?
+
+#+NAME: declaration_SDL
+#+BEGIN_SRC cpp :noweb yes
+
+  SDL_Window* gWindow = NULL;
+  SDL_Surface* surface = NULL;
+  SDL_Event event;
+  SDL_Keysym keysym;
+  int SCREEN_WIDTH = 480;
+  int SCREEN_HEIGHT = 520;
+
+  bool init();
+  bool create();
+  bool surface_create();
+
+
+  <<declaration_move_box>>
+  <<declaration_hero>>
+
+#+END_SRC
+
+Итак мы сказали, у нас будет указатель на окно, указатель на
+поверхность, объект "event", объект "keysym", а размер нашего будущего
+окна будет 480 х 520. Так же нам нужны 3 функции. Init(); "включит"
+нам все функции SDL, create(); создаст окно, а surface_create();
+создаст поверхность в этом окне.
+
+#+NAME: three_functions_SDL
+#+BEGIN_SRC cpp :noweb yes
+
+  bool init() {
+      if( SDL_Init( SDL_INIT_VIDEO ) < 0 ) {
+          printf( "SDL could not initialize! SDL_Error: %s\n", SDL_GetError() );
+          return false;
+      }
+      return true;
+  }
+
+  bool create() {
+      if ( !( gWindow = SDL_CreateWindow("SDL Tutorial",
+                                         SDL_WINDOWPOS_UNDEFINED,
+                                         SDL_WINDOWPOS_UNDEFINED,
+                                         SCREEN_WIDTH,
+                                         SCREEN_HEIGHT,
+                                         SDL_WINDOW_SHOWN)) ) {
+          printf( "SDL_CreateWindow() failed! SDL_Error: %s\n", SDL_GetError() );
+          return false;
+      }
+      return true;
+  }
+
+  bool surface_create() {
+      if ( !(surface = SDL_GetWindowSurface(gWindow)) ) {
+          printf ("Didn't create surface! SDL_Error: %s\n", SDL_GetError());
+          return false;
+      }
+      return true;
+  }
+
+#+END_SRC
+Все три функции должны вернуть true или напечатать сообщение о
+возникшей ошибке.
+
+*** Отрисовка квадратика-героя
+
+Начало положено. Теперь можно попробовать вывести главного героя на
+экран. У него есть координаты X и Y, а так же размер его сторон.
+
+#+NAME: declaration_hero
+#+BEGIN_SRC cpp
+
+  int X = 0;
+  int Y = 0;
+
+  int pix_y = 10;
+  int pix_x = 10;
+
+#+END_SRC
+
+А еще он состоит из пикселей, которые надо отрисовать. Отрисовка
+пикселей будет нужна постоянно, поэтому разумно написать для этого
+отдельную функцию.
+
+#+NAME: DrawPixel
+#+BEGIN_SRC cpp :noweb yes
+
+  void DrawPixel(SDL_Surface *screen, int x, int y,
+                 Uint8 R, Uint8 G, Uint8 B) {
+      Uint32 color = SDL_MapRGB(surface->format, R, G, B);
+      int bpp =  surface->format->BytesPerPixel;
+      Uint32 ppr = surface->pitch/bpp;
+
+      switch (bpp) {
+      case 1:
+          {
+              Uint8 *p = (Uint8 *)surface->pixels + (y * ppr + x )* bpp;
+              ,*p = color;
+          }
+          break;
+      case 2:
+          {
+              Uint16 *p = (Uint16 *)surface->pixels + (y * ppr + x );
+              ,*p = color;
+          }
+          break;
+      case 3:
+          {
+              Uint8 *p = (Uint8 *)surface->pixels +
+                  y*surface->pitch + x * 3;
+              if(SDL_BYTEORDER == SDL_LIL_ENDIAN)
+                  {
+                      p[0] = color;
+                      p[1] = color >> 8;
+                      p[2] = color >> 16;
+                  } else {
+                  p[2] = color;
+                  p[1] = color >> 8;
+                  p[0] = color >> 16;
+              }
+          }
+          break;
+      case 4:
+          {
+              Uint32 *p = (Uint32 *)surface->pixels + (y * ppr + x );
+              ,*p = color;
+          }
+          break;
+      default:
+          printf("DrawPixel ERR: Unknown type of pixel \n");
+          exit(0);
+      }
+  }
+
+#+END_SRC
+DrawPixel принимает в качетве параметра адрес поверхности, на которой
+предстоит рисовать, и координаты пикселя и составляющие его цвета.
+Затем она проверят, сколько бит приходится на пиксель и в зависимости
+от этого отрисовывает его тем или иным способом.
+
+Теперь мы можем написать функцию, которая будет нам рисовать
+квадратик, чтоб не передавать каждый пиксель в Draw_Pixel
+вручную. Перед использованием DrawPixel в цикле, мы будем блокировать
+поверхность, чтоб пользователь случайно не увидел процесс
+отрисовки. После цикла поверхность будет разблокирована и обновлена,
+чтоб изменения стали выдимыми.
+
+#+NAME: show_box
+#+BEGIN_SRC cpp
+
+  void show_box(int box_x, int box_y, int side_a, int side_b,
+                int red, int green, int blue) {
+      int side_x = side_a;
+      int side_y = side_b;
+      int max_y = box_y + side_y;
+      int max_x = box_x + side_x;
+      SDL_LockSurface(surface);
+
+
+      int cnt = 0;
+      for ( int j = box_y; j < max_y; j++) {
+          for ( int i = box_x; i < max_x; i++) {
+              DrawPixel(surface, i, j, red, green, blue);
+          }
+      }
+      SDL_UnlockSurface(surface);
+      SDL_UpdateWindowSurface(gWindow);
+  }
+
+#+END_SRC
+
+Функция принимает координаты квадратика, размер его сторон и
+составляющие цвета. Затем вызывает Draw_Pixel в двух циклах, чтоб
+получился квадра
+*** Движение квадратика
+
+Вряд ли можно представить себе что-то скучнее, чем неподвижный герой,
+который к тому же еще и квадрат. Нам необходимо двигать его во все
+четыре стороны. Для этого мы напишем функцию, которая принимает в
+качестве параметров координаты квадратика и идентификатор нажатой
+клавиши.
+
+Сначала мы получим иеднтификатор клавиши, после срабатывания
+соответствующего условия мы отрисуем квадратик фоновым цветом на том
+же самом месте, затем изменим его координаты и отрисуем заново
+привычным цветом.
+
+#+NAME: declaration_move_box
+#+BEGIN_SRC cpp
+
+  void move_box( int &X, int &Y, int event);
+
+#+END_SRC
+
+
+#+NAME: move_box
+#+BEGIN_SRC cpp
+
+  void move_box(int &X, int &Y, int event) {
+
+      int event_type = event;
+
+      switch(event_type) {
+
+      case 3:
+          show_box(X, Y, pix_x, pix_y, 0, 0, 0);
+          X++;
+          show_box(X, Y, pix_x, pix_y, 255, 255, 255);
+          break;
+
+      case 4:
+          show_box(X, Y, pix_x, pix_y, 0, 0, 0);
+          X--;
+          show_box(X, Y, pix_x, pix_y, 255, 255, 255);
+          break;
+
+      case 5:
+          show_box(X, Y, pix_x, pix_y, 0, 0, 0);
+          Y++;
+          show_box(X, Y, pix_x, pix_y, 255, 255, 255);
+
+      case 6:
+          show_box(X, Y, pix_x, pix_y, 0, 0, 0);
+          Y--;
+          show_box(X, Y, pix_x, pix_y, 255, 255, 255);
+          break;
+      default:
+          printf("move_box ERR: Unknoun type of event \n");
+      }
+  }
+
+#+END_SRC
+
+Теперь возникает вопрос, как компьютер поймет, какя клавиша была
+нажата? Для этого существует такое понятие как "обработка
+событий". Вот этим мы сейчас и займемся.
+
+*** Обработка событий
+
+Каждое нажатие клавиши клавиатуры, мыши, ее движение или движение
+джостика и т.д. называется событием. Каждое событие в SDL имеет свой
+идентификатор,таблица событий и их идентификаторов
+лежит где-то в недрах библиотеки.
+
+
+Для распознавания событий мы напишем цикл, который будет ожидать и
+обрабатывать новые события до тех пор, пока не встретит событие
+"выход".
+
+Данный цикл может обрабатывать собтия трех типов:
+- события мышки
+- собтия клавиатуры
+- видео события
+
+В случае, если событие пришло с клавиатуры, то будет вызвана новая
+функция, для более подробной обработки, т.к. событий с клавиатуры
+несравнимо больше, чем событий с мышки.
+
+#+NAME: event_loop
+#+BEGIN_SRC cpp
+
+    while (256 != event.type) {
+        SDL_WaitEventTimeout(& event, 100);
+
+        switch (event.type) {
+        case SDL_MOUSEMOTION:
+            break;
+
+        case SDL_KEYDOWN:
+            Handle_Keydown(&event.key.keysym);
+            break;
+
+        case SDL_WINDOWEVENT:
+            break;
+
+        default:
+            printf("Handle_Keydown ERR: Unknown type of keysym \n");
+        }
+  }
+
+#+END_SRC
+
+Функция получит указатель на идентификатор, чтобы распознать нажатую клавишу и
+совершить необходимые действия, в зависимости от того, что было нажато.
+
+#+NAME: Handle_Keydown
+#+BEGIN_SRC cpp
+
+  void Handle_Keydown(SDL_Keysym* keysym) {
+
+      SDL_Event event;
+      switch(keysym->sym) {
+
+      case SDLK_3:
+          printf("3 is pressed\n");
+          if (X != SCREEN_WIDTH - pix_x) {
+              move_box(X,Y,3);
+          }
+          break;
+
+      case SDLK_4:
+          printf("4 is pressed\n");
+
+          if (X != 0) {
+              move_box(X,Y,4);
+          }
+          break;
+
+      case SDLK_5:
+          printf("5 is pressed\n");
+          if (Y != SCREEN_HEIGHT - pix_y) {
+              move_box(X,Y,5);
+          }
+          break;
+
+      case SDLK_6:
+          printf("6 is pressed\n");
+          if (Y != 0) {
+              move_box(X,Y,6);
+          }
+          break;
+
+      default:
+          printf("Can't find this key\n");
+          break;
+      }
+  }
+#+END_SRC
+
+Данная функция распознает четыре клавиши: цифру 3, 4, 5 и 6.
+
+*** Сокеты и процесс обмена данными
+
+Двигать квадратик по пустому полю это забавно, конечно, но при
+условии, что игру вы разрабатываете для кошки. Любому человеку это
+надоест секунд через двадцать, ему захочется с кем-нибудь
+сразиться. Значит, нам надо придумать способ, как подключить второго
+игрока на другом компьютере к одной и той же сессии игры.
+
+Пришло время для сокетов и создания сервера. Сервер мы разработаем в
+отдельном большом разделе, который так и называется "сервер". А пока
+что создадим "портал в другой мир" на клиенте.
+
+Для этого мы создадим сокет и дополнительный поток, который будет
+принимать и отправлять данные, чтоб не очень нагружать основной
+поток. Тогда отрисовка начинает работать медленно, и все мигает.
+
+Сначала декларируем прееменную, в которую поместим дескриптор сокета и
+сутрктуру, куда поместим данные сокета.
+#+NAME: udp_init_declaration
+#+BEGIN_SRC cpp
+
+int sockfd;
+struct sockaddr_in servaddr;
+
+
+#+END_SRC
+
+Функция инициализирует сокет, создает новый поток и возвращает нам его
+указатель.
+
+#+NAME: udp_init
+#+BEGIN_SRC cpp :noweb yes
+
+  pthread_t udp_init() {
+      // Создаем сокет.
+      // Должны в случае успеха получить его дескриптор
+      // в глобальную переменную sockfd
+      if ( (sockfd = socket(AF_INET, SOCK_DGRAM, 0) ) < 0 ) {
+          perror("socket creation failed");
+          exit(EXIT_FAILURE);
+      }
+      // Переводим сокет в неблокирующий режим
+      fcntl(sockfd, F_SETFL, O_NONBLOCK);
+      // заполняем данные о сервере
+      servaddr.sin_family = AF_INET;
+      servaddr.sin_port = htons(8080);
+      servaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+      /*создаем новый поток*/
+      <<udp_thread_create>>
+
+      return udp_thread;
+  }
+
+#+END_SRC
+
+#+NAME: udp_thread_create
+#+BEGIN_SRC cpp
+
+  /* создаем новый поток */
+  pthread_t udp_thread;
+
+  void *(*thread_func)(void *) = udp_socket;
+
+  if( 0 != pthread_create( &udp_thread, NULL, thread_func, NULL ) ) {
+      perror("thread_create failed");
+      exit(EXIT_FAILURE);
+  }
+#+END_SRC
+
+Теперь разберемся с самой функцией потока. В ней у нас будет все самое
+интересное.
+
+Функция будет делать следующее:
+
+- сериализовать данные нашего клиента
+- отправлять пакет
+- принимать пакет
+- десериализовать данные, если они есть, конечно
+- отрисовывать "врага"
+
+И так до тех пор, пока игра не кончится.
+
+Прежде чем писать саму функцию потока, напишем ее составляющие:
+функцию сериализации и функцию десериализации.
+
+Декларируем их в начале файла, чтоб компилятор не возмущался.
+
+#+NAME: serial_and_deserial_declaration
+#+BEGIN_SRC cpp
+
+void* serialization();
+
+void deserialization (void * input);
+
+#+END_SRC
+
+Сериализация.
+Функция сериализации выделит нам память под буфер и заполнит его
+данными. Сериализуем координаты квадратика, размер его сторон и
+идентификатор, который нам понадобится на сервере, чтоб распознавать,
+от кого пришел пакет, а затем вернем указатель на заполненный буфер,
+чтоб другие функции могли работать с ним тоже.
+
+Сначала декларируем идентификатор.
+
+
+#+NAME: client_ident_declaration
+#+BEGIN_SRC cpp
+
+/*идентификатор игрока-клиента*/
+int identificator;
+
+#+END_SRC
+
+Теперь приступим к самой сериализации.
+
+#+NAME: serialization
+#+BEGIN_SRC cpp
+
+  void* serialization() {
+      /*выделяем память под буфер*/
+      void * udp_buffer = malloc((sizeof(int) * 5) + sizeof(pixels));
+      printf(" Size is %d\n", sizeof(int) * 5 + sizeof(pixels));
+      /* сохраняем неизмененный указатель на буфер */
+      void *pnt = udp_buffer;
+
+      /* сериализуем идентификатор квадратика */
+      memcpy(udp_buffer, &identificator, sizeof(int));
+      udp_buffer += sizeof(identificator);
+
+      /*сериализуем координаты квадратика и его размер*/
+      memcpy(udp_buffer, &X, sizeof(X));
+      udp_buffer += sizeof(X);
+      memcpy(udp_buffer, &Y, sizeof(Y));
+      udp_buffer += sizeof(Y);
+
+      memcpy(udp_buffer, &pix_y, sizeof(pix_y));
+      udp_buffer += sizeof(pix_y);
+      memcpy(udp_buffer, &pix_x, sizeof(pix_x));
+      udp_buffer += sizeof(pix_x);
+
+      return pnt;
+  }
+
+#+END_SRC
+
+Десериализация.
+Десериализация - это антипод сериализации. Мы получаем набор байт и
+распихиваем их по переменным, структурам и т.д. Прежде чем приступить
+к десериализации данных, я хочу обратить внимание на два момента.
+
+Момент первый.
+Наш квадратик-герой будет врагом для квадратика другого
+игрока. Соответственно, когда мы будем десериализовать данные другого
+клиента, которые нам перешлет от него сервер, то надо делать это не в
+переменные нашего квадратика, а завести другие. Это мы сейчас и
+сделаем.
+
+#+NAME: enemy_declaration
+#+BEGIN_SRC cpp
+
+int X_enemy = 0;
+int Y_enemy = 0;
+
+/* размер сторон врага */
+int pix_y_enemy = 10;
+int pix_x_enemy = 10;
+
+#+END_SRC
+
+Собственно, другие переменные и цвет - это единственные факторы,
+которые будут отличать врага от героя для нас и для компьютера. В
+остальном мы будем пользоваться теми же функциями, для отрисовки врага
+и его перемещений.
+
+Момент второй.
+Как было заявлено ранее, смысл игры в том, чтоб съесть своего врага,
+становясь больше при поглощении рандомных пикселей. Думаю, вы уже
+задавались вопросом, где, собственно пиксели-еда.
+
+Они будут генерироваться на сервере, поскольку так легче
+синхронизировать процесс между клиентами. Прежде чем передать нам
+пакет от другого клиента, сервер будет дополнять его данными
+пикселей. Соответственно, нам неплохо было бы завести место в памяти,
+куда мы будем записывать их данные, чтоб потом их отрисовать.
+
+Для этого мы заведем структуру, которая будет включать в себя
+координаты пикселя и его состояние, т.е. не съели ли его уже. Скажем,
+у нас будет максимум сто пикселей, так что нам понадобится массив
+структур.
+
+#+NAME: array_of_pixels
+#+BEGIN_SRC cpp
+  /* максимальное кол-во пикселей еды на поле */
+  #define MAX_PIXELS 100
+
+  struct pixel {
+      char alive = 0;
+      int c;
+      int d;
+  } pixels[100];
+
+#+END_SRC
+
+Теперь приступим непосредственно к десериализации.
+Что делает функция десериализации?
+- принимает указатель от функции сериализации, чтоб писать в то же
+  место
+- пропускает чужой идентификатор клиента за ненадобностью
+- закрывает мьютекс
+- десериализует данные врага
+- десериализует данные пикселей-еды
+- открывает мьютекс
+- очищает место в памяти, поскольку функция сериализации выделяет ее
+  каждый раз, а используется она несколько раз в секунду. В общем,
+  память так будет очень быстро захламлена.
+
+Создадим-ка мы мьютекс для начала.
+
+#+NAME: mutex_declaration
+#+BEGIN_SRC cpp
+
+/* объявление мьютекса */
+pthread_mutex_t mutex;
+
+#+END_SRC
+
+Теперь можно и десериализацией заняться.
+
+
+#+NAME: deserialization
+#+BEGIN_SRC cpp
+
+  void deserialization (void * input) {
+      void * buffer = input;
+      /*сохраняем неизмененный указатель*/
+      void * pnt = input;
+      int i = 0;
+
+      /*пропускаем идентификатор, он нам не нужен*/
+      int ident = *(int *)buffer;
+      // printf("ident is %d\n", ident);
+      buffer += sizeof(int);
+
+      /*десериализуем данные врага*/
+      /* закрываем мьютекс здесь,
+         т.к. это критическая секция кода*/
+      pthread_mutex_lock(&mutex);
+      X_enemy = *(int *)buffer;
+      buffer += sizeof(int);
+      Y_enemy  = *(int *)buffer;
+      buffer += sizeof(int);
+
+      pix_y_enemy = *(int *)buffer;
+      buffer += sizeof(int);
+      pix_x_enemy = *(int *)buffer;
+      buffer += sizeof(int);
+      //printf("X_enemy %d Y_enemy %d\n", X_enemy, Y_enemy);
+      int j = 0;
+      /* десериализуем пиксели */
+
+      while (j <=99) {
+          //printf("..........\n");
+          pixels[j].alive = *(char *)buffer;
+          buffer += sizeof(char);
+          //printf("buffer in %d iteration is %X\n", j, buffer);
+          pixels[j].c = *(int *)buffer;
+          buffer += sizeof(int);
+          //printf("buffer in %d iteration is %X\n", j, buffer);
+          pixels[j].d = *(int *)buffer;
+          buffer += sizeof(int);
+          //printf("buffer in %d iteration is %X\n", j, buffer);
+          j++;
+      }
+
+      /* откываем мьютекс после выхода из цикла*/
+      pthread_mutex_unlock(&mutex);
+      /* освобождаем место в памяти */
+      free(pnt);
+  }
+#+END_SRC
+
+Вы еще помните, зачем нам все это надо, да?
+Наконец-то, у нас есть все, чтоб собрать функцию потока, который будет
+отправлять и принимать пакеты.
+
+Мы запустим десконечный цикл, который будет осуществлявляться каждую
+милисекунду. Сначала сериализуем данные, затем отправим их, получим
+новые и десериализуем их в то же место в памяти, куда сериализовали до
+этого. Затем отрисуем врага.
+
+Важно! Если данные не получены, то десериализация и отрисовка врага не
+сработает.
+
+#+NAME: udp_thread
+#+BEGIN_SRC cpp
+  void* udp_socket(void* pointer) {
+      while (true) {
+
+          usleep(10000); // sleep for 0.01 sec
+
+          /* сериализуем данные*/
+
+          void *buffer = serialization();
+
+          socklen_t len = sizeof(servaddr);
+
+          ssize_t sended = sendto( sockfd, buffer, 1212, MSG_CONFIRM,
+                                   (const struct sockaddr *) &servaddr,
+                                   sizeof(servaddr) );
+          if(-1 == sended) {
+              printf("::udp_socket():: Error: Send datagramm\n");
+              exit(EXIT_FAILURE);
+
+          } else {
+              /* получаем данные */
+              ssize_t received = recvfrom( sockfd, buffer, 1212, MSG_WAITALL,
+                                           (struct sockaddr *) &servaddr,
+                                           (socklen_t *)&len );
+
+              /* если пакеты получены */
+              if ( received != -1 ) {
+                  /*копируем старые данные врага*/
+                  int check_X = X_enemy;
+                  int check_Y = Y_enemy;
+
+                  /*десериализуем новые*/
+                  deserialization(buffer);
+                  /*проверяем, не изменились ли координаты*/
+                  if ( check_X != X_enemy || check_Y != Y_enemy) {
+                      /*если координаты изменились,
+                        то отрисовываем старые координаты фоном*/
+                      show_box(check_X, check_Y, pix_x_enemy, pix_y_enemy, 0, 0, 0);
+
+                  } else {
+                      /*затем отрисовываем */
+                      show_box(X_enemy, Y_enemy, pix_x_enemy, pix_y_enemy, 255, 0, 0);
+                  }
+              }
+          }
+      }
+  }
+#+END_SRC
+
+Теперь самое время это все собрать.
+
+#+NAME: main
+#+BEGIN_SRC cpp :noweb yes
+  int main() {
+
+      if( !init() ) {
+          printf( "Failed to initialize SDL!\n" );
+
+      } else if( !create() ) {
+          printf( "Failed to initialize window!\n" );
+
+      } else if( !surface_create() ) {
+          printf( "Failed to initialize surface!\n" );
+
+      } else {
+
+          SDL_LockSurface(surface);
+          srand(time(NULL));
+          X = rand() % 500;
+
+          show_box(X, Y, pix_x, pix_y, 255, 255, 255);
+          SDL_UnlockSurface(surface);
+          SDL_UpdateWindowSurface(gWindow);
+
+          /* создаем идентификатор */
+          srand(time(NULL));
+          identificator = rand() % 500;
+
+          /* создаем мьютекс */
+          mutex = PTHREAD_MUTEX_INITIALIZER;
+
+          /* создаем сокет */
+          udp_init();
+          printf("инициализация udp прошла успешно\n");
+
+          <<event_loop>>
+      }
+  }
+#+END_SRC
+
+Мы проинициализировали SDL, создали окно и поверхность, затем
+заблокировали проверхность, чтоб пользователь не увидел всю "кухню"
+отрисовки, получили рандомно координату X для квадратика, чтоб он
+каждй раз появлялся в разном месте, вызвали его отсовку,
+разблокировали поверхность и обновили ее, создали идентификатор,
+инициализировали мьютекс, создали сокет, а затем ждем событий до тех
+пор, пока окно не будет закрыто пользователем.
+
+* Сборка
+
+C-c C-v t
+
+# GNU Emacs 24.5.1 (x86_64-pc-linux-gnu, GTK+ Version 3.18.9) of 2017-09-20
+# on lcy01-07, modified by Debian
+
+#+NAME: game
+#+BEGIN_SRC forth :tangle game.cpp :noweb tangle :exports code :padline no :comments none
+  <<libraries>>
+
+  <<declaration_SDL>>
+
+  <<mutex_declaration>>
+
+  <<client_ident_declaration>>
+
+  <<enemy_declaration>>
+
+  <<serial_and_deserial_declaration>>
+
+  <<udp_init_declaration>>
+
+  <<array_of_pixels>>
+
+  <<three_functions_SDL>>
+
+  <<DrawPixel>>
+
+  <<show_box>>
+
+  <<move_box>>
+
+  <<udp_thread>>
+
+  <<udp_init>>
+
+  <<serialization>>
+
+  <<deserialization>>
+
+  <<Handle_Keydown>>
+
+  <<main>>
+#+END_SRC

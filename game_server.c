@@ -43,9 +43,9 @@ int sockfd;
 
 /* объявление структуры и массива пикселей */
 struct pixel {
-    char alive;
-    int c;
-    int d;
+    int alive;
+    int x;
+    int y;
 } pixels[MAX_PIXELS];
 
 
@@ -53,25 +53,25 @@ struct pixel {
 struct connection {
     int thread;
     int ident;
+    int data_n;
     char *buf;
     struct sockaddr_in *sockaddr_p;
 
 } clients[MAX_CLIENTS];
 
-/* индекс следующего клиента */
-int new_client_idx = 0;
+
 void * serialization(char * input, int* x, int* y, int* x_side,
                      int* y_side);
 void deserialization (void * input, int* x, int* y, int* x_side,
                       int* y_side);
-
-int numpix = 0;
 
 /* процедура генерации одного нового пикселя еды */
 int PixelArray (void *p_pixels) {
     /* счетчик цикла, объявляется вне цикла, чтобы проанализировать
        пройден ли весь массив */
     int i;
+
+    /* printf("\n"); */
     for (i = 0; i < MAX_PIXELS; i++) {
         if (0 == pixels[i].alive) {
             /*сгенерируем пиксели */
@@ -82,13 +82,14 @@ int PixelArray (void *p_pixels) {
             a = rand() % MAX_SIZE_X;
             b = rand() % MAX_SIZE_Y;
 
-            if ((a == pixels[i].c) && (b == pixels[i].d)) {
+            if ( ( pixels[i].x == a) && (pixels[i].y == b) ) {
                 goto generate_new_pixel;
             }
 
-            pixels[i].c = a;
-            pixels[i].d = b;
+            pixels[i].x = a;
+            pixels[i].y = b;
             pixels[i].alive = 1;
+            /* printf("pixel x %d y %d\n", pixels[i].x, pixels[i].y); */
         }
     }
 
@@ -107,7 +108,8 @@ void deserialization(void * input, int* x, int* y, int* x_side,
                      int* y_side) {
 
     void * buffer = input;
-    /*пропускаем идентификатор*/
+    /*пропускаем идентификатор и номер датаграммы*/
+    buffer += sizeof(int);
     buffer += sizeof(int);
 
     /*десериаизуем координаты*/
@@ -121,18 +123,19 @@ void deserialization(void * input, int* x, int* y, int* x_side,
     buffer += sizeof(int);
     *y_side = *(int *)buffer;
     buffer += sizeof(int);
-
 }
 
-void * serialization(char * input, int* x, int* y, int* x_side,
-                     int* y_side) {
+void * serialization(char * input, int* x, int* y, int* x_side, int* y_side) {
 
     /* сохраняем неизмененный указатель на буфер */
     char *pointer = input;
-    /* printf("pointer in serial %p\n", pointer); */
-    /*пропускаем идентификатор*/
-    void *pnt =  (void*)input + sizeof(int);
-    /* printf("pnt in serial %p\n", pnt); */
+    /*пропускаем идентификатор и номер датаграммы*/
+    void *pnt;
+
+    pnt = (void*)input + sizeof(int);
+    pnt = pnt + sizeof(int);
+
+    /* printf("x_side %d y_side %d\n", *x_side, *y_side); */
 
     /*перезаписываем данные координат и сторон */
     memcpy(pnt, x, sizeof(int));
@@ -145,20 +148,20 @@ void * serialization(char * input, int* x, int* y, int* x_side,
     memcpy(pnt, y_side, sizeof(int));
     pnt += sizeof(int);
 
-    /* // дополняем данными пикселей */
-    /* for (int i = 0; i <=99; i++) { */
+    // дополняем данными пикселей
+    for (int i = 0; i <=99; i++) {
 
-    /*     *(char*)pnt = pixels[i].alive; */
-    /*     pnt += sizeof(char); */
-    /*     *(char*)pnt = pixels[i].c; */
-    /*     pnt += sizeof(char); */
-    /*     *(char*)pnt = pixels[i].d; */
-    /*     pnt += sizeof(char); */
-    /* } */
+        *(int*)pnt = pixels[i].alive;
+        pnt += sizeof(int);
+        *(int*)pnt = pixels[i].x;
+        pnt += sizeof(int);
+        *(int*)pnt = pixels[i].y;
+        pnt += sizeof(int);
+    }
     return pointer;
 }
 
-void * counter (char * input) {
+void * counter (char * input, int* numpix) {
 
     int x = 0;
     int y = 0;
@@ -166,60 +169,71 @@ void * counter (char * input) {
     int y_side = 0;
 
     void  * buffer = (void *)input;
-
     char *p = input;
+    int eatten_pix = *numpix;
 
     /*десериализуем данные*/
     deserialization(buffer, &x, &y, &x_side, &y_side);
 
-    /* printf("\n x %d\n y %d\n x_side %d\n y_side %d\n", */
+    /* printf("\n before: x %d\n y %d\n x_side %d\n y_side %d\n", */
     /*        x, y, x_side, y_side); */
+    /* fflush(stdout); */
 
-    /* for (int i= 0; i <= 99; i++) { */
-    /*     /\*если пиксель находится внутри квадрата*\/ */
-    /*     if(pixels[i].c <= x + (x_side - 1) && */
-    /*        pixels[i].c > x && */
-    /*        pixels[i].d <= y + (y_side - 1) && */
-    /*        pixels[i].d >= y) { */
-    /*         /\*то мы объявляем его как съеденный*\/ */
-    /*         pixels[i].alive = 0; */
+    for (int i = 0; i < MAX_PIXELS; i++) {
+        /*если пиксель находится внутри квадрата*/
+        if( ( pixels[i].alive == 1 )             &&
+            ( pixels[i].x <= x + (x_side - 1) ) &&
+            ( pixels[i].x > x )                 &&
+            ( pixels[i].y <= y + (y_side - 1) ) &&
+            ( pixels[i].y > y ) ) {
+            /*то мы объявляем его как съеденный*/
+            pixels[i].alive = 0;
 
-    /*         /\*увеличиваем счетчик съеденных пикселей*\/ */
-    /*         numpix++; */
+            printf("\n x %d y %d x_side %d y_side %d\n",
+                   x, y, x_side, y_side);
+            printf("\n pixel x %d pixel y %d\n",
+                   pixels[i].x, pixels[i].y);
+            printf("\n");
 
-    /*         /\*на каждом третьем пикселе квадрат увеличивается */
-    /*           Пора увеличить?*\/ */
-    /*         int result =  numpix % 3; */
-    /*         if (result == 0) { */
+            /*увеличиваем счетчик съеденных пикселей*/
+            *numpix = eatten_pix + 1;
 
-    /*             /\* горизонталь и диагональ увеличиваются на 1*\/ */
-    /*             x_side++; */
-    /*             y_side++; */
+            printf("съеден\n");
+            printf("numpix %d\n", *numpix);
+            /*на каждом третьем пикселе квадрат увеличивается
+              Пора увеличить?*/
+            int result =  eatten_pix % 3;
 
-    /*         } */
-    /*     } */
-    /* } */
+            if (result == 0) {
+                /* printf("увеличить\n"); */
+                /* горизонталь и диагональ увеличиваются на 1*/
+                x_side++;
+                y_side++;
+
+                printf("\n x_side %d y_side %d\n",
+                       x, y, x_side, y_side);
+
+                printf("\n");
+            }
+        }
+    }
+
+    /* printf("\n after: x %d\n y %d\n x_side %d\n y_side %d\n", */
+    /*        x, y, x_side, y_side); */
 
     /*сериализуем обратно*/
     void * pnt = serialization(p, &x, &y, &x_side, &y_side);
-
-    /* x = 0; */
-    /* y = 0; */
-    /* x_side = 0; */
-    /* y_side = 0; */
-
-    /* deserialization((void*)p, &x, &y, &x_side, &y_side); */
-    /* printf("\n after: x %d\n y %d\n x_side %d\n y_side %d\n", */
-    /*        x, y, x_side, y_side); */
 
     return pnt;
 }
 
 void* send_data(void* buf_pointer) {
     printf("Thread is going\n");
+    int* numpix = (int*)malloc(sizeof(int));
+    *numpix = 0;
     while(1) {
 
-        /* sleep (1); */
+        /* sleep (2); */
 
         /* получаем идентификатор клиента */
         void *ident_pnt = buf_pointer;
@@ -232,9 +246,20 @@ void* send_data(void* buf_pointer) {
 
             /* если идентификатор из буфера совпадает
                с идентификатором  клиента */
-            if (ident == clients[i].ident) {
+            if ( ident == clients[i].ident ) {
                 /* то получаем указатель на его буфер */
                 char *cur_client_buf = clients[i].buf;
+                /* printf("cur_client_buf %p \n", cur_client_buf); */
+                cur_client_buf = (char*)counter(cur_client_buf, numpix);
+                /* printf("cur_client_buf %p \n", cur_client_buf); */
+                /* printf("отправляю пакет от клиента %d к клиенту %d\n", */
+                /*        ident, clients[i].ident); */
+
+                /* printf("\n"); */
+                int num =  sendto(sockfd, cur_client_buf, MAXLINE,
+                                  MSG_CONFIRM,
+                                  (struct sockaddr *)clients[i].sockaddr_p,
+                                  sizeof(cliaddr));
 
                 /* и ищем не совпадающий идентификатор */
                 for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -243,12 +268,11 @@ void* send_data(void* buf_pointer) {
                     if (ident != clients[i].ident &&
                         clients[i].ident != 0 ) {
 
+                        /*дополняем буфер данными*/
+
                         /* printf("отправляю пакет от клиента %d к клиенту %d\n", */
                         /*        ident, clients[i].ident); */
-                        /* printf("данные: "); */
-                        /*дополняем буфер данными*/
-                        counter(cur_client_buf);
-
+                        /* printf("\n"); */
                         /* отправляем пакет */
                         /* printf("client.sockaddr_p %p\n", clients[i].sockaddr_p); */
                         /* printf("\n"); */
@@ -299,7 +323,7 @@ void get_data_and_register_client() {
     while (1) {
 
         /* Создаем новые пиксели еды если есть возможность */
-        /* generate_pixels() */
+        generate_pixels();
 
         /* Читаем датаграмму */
         int len = sizeof(cliaddr);
@@ -309,35 +333,36 @@ void get_data_and_register_client() {
 
         /* Разбираем датаграмму и пересылаем изменения остальным клиентам */
 
-        /* вытаскиваем идентификатор */
-        int ident_client = *(int *)buffer;
+        /* вытаскиваем идентификатор и номер датаграммы */
+        char* input = buffer;
+
+        int ident_client = *(int *)input;
+        input += sizeof(int);
+        int data_n = *(int *)input;
 
         for(int i = 0; i < MAX_CLIENTS; i++) {
 
             /*если идентификатор совпадает - клиент уже зарегестрирован*/
             /* просто обновляем его данные  */
-            if( clients[i].ident == ident_client) {
+            if( ( clients[i].ident == ident_client ) &&
+                ( clients[i].data_n < data_n ) ) {
 
                 char *buf_pointer = clients[i].buf;
                 memcpy(buf_pointer, buffer, MAXLINE);
                 clients[i].buf = buf_pointer;
                 break;
-            }
 
-            /*если структура пустая и счетчик нулевой - у нас новый клиент*/
-            if( ( clients[i].ident == 0 ) ) {
+            } else if ( clients[i].ident == 0 ) {
 
                 struct connection new_client_connect = clients[i];
-
                 /* выделяем память под буфер и перезаписываем туда данные */
                 char *new_client_buf = malloc(MAXLINE);
                 memcpy(new_client_buf, buffer, MAXLINE);
 
-                new_client_connect.ident = ident_client;
-
-                /* записали идентификатор и адрес буфера */
+                /* записали идентификатор, адрес буфера и номер датаграммы*/
                 new_client_connect.buf = new_client_buf;
                 new_client_connect.ident = ident_client;
+                new_client_connect.data_n = data_n;
 
                 /* создаем поток и записываем его идентификатор в стуктуру*/
                 /* переменная для хранения идентификатора потока */
@@ -358,7 +383,6 @@ void get_data_and_register_client() {
                                send_data, (void*)buffer);
 
                 new_client_connect.thread = udp_thread;
-
                 clients[i] = new_client_connect;
 
                 /* printf("clients[i].sockaddr_p is %p\n", clients[i].sockaddr_p); */

@@ -19,35 +19,39 @@ SDL_Event event;
 SDL_Keysym keysym;
 int SCREEN_WIDTH = 480;
 int SCREEN_HEIGHT = 520;
+#define MAX_PIXELS 100
 
 bool init();
 bool create();
 bool surface_create();
 
-void* serialization(int* my_x, int* my_y, int* pix_y, int* pix_x, int* ident);
+void* serialization(int* my_x, int* my_y, int* pix_y, int* pix_x,
+                    int* ident, int* data_n);
 
-void deserialization (void * input, int* enemy_x, int* enemy_y,
-                      int* enemy_pix_y, int* enemy_pix_x);
+// void* serialization(int* my_x, int* my_y, int* pix_y, int* pix_x,
+//                     int* ident);
 
-void move_box( int* my_x, int* my_y, int event);
+void deserialization(void * input, int* enemy_x, int* enemy_y,
+                     int* enemy_pix_y, int* enemy_pix_x);
 
+void move_box(int* x, int* y, int* x_side, int* y_side, int event);
+
+void show_pixels();
 /* объявление мьютекса */
 pthread_mutex_t mutex;
 
-int sockfd;
+/* объявление мьютекса */
+pthread_mutex_t show_pixels_mutex;
 
 struct sockaddr_in servaddr;
 
-/* максимальное кол-во пикселей еды на поле */
-#define MAX_PIXELS 100
+int sockfd;
 
 struct pixel {
-    char alive = 0;
-    int c;
-    int d;
+    int alive = 0;
+    int x;
+    int y;
 } pixels[100];
-
-
 
 bool init() {
     if( SDL_Init( SDL_INIT_VIDEO ) < 0 ) {
@@ -136,14 +140,14 @@ void show_box(int box_x, int box_y, int side_a, int side_b,
     int max_y = box_y + side_y;
     int max_x = box_x + side_x;
 
-    // printf("\n show_box: box_x %d box_y %d side_x %d side_y %d\n ", box_x, box_y,
-    //        side_x, side_y);
+    printf("\n show_box: box_x %d box_y %d side_x %d side_y %d\n ", box_x, box_y,
+           side_x, side_y);
 
     SDL_LockSurface(surface);
 
     int cnt = 0;
-    for ( int j = box_y; j < max_y; j++) {
-        for ( int i = box_x; i < max_x; i++) {
+    for ( int j = box_y; j < max_y; j++ ) {
+        for ( int i = box_x; i < max_x; i++ ) {
             DrawPixel(surface, i, j, red, green, blue);
         }
     }
@@ -223,21 +227,28 @@ void* udp_socket(void* data_array) {
     int* pix_y_enemy = *data_array_begin;
     data_array_begin += sizeof(pix_y_enemy);
 
-    int* ident = *data_array_begin;
+    int* my_ident = *data_array_begin;
+
+    int* data_n = (int*)malloc(sizeof(int));
+    *data_n = 0;
 
     while (true) {
 
-        // usleep(10000); // sleep for 0.01 sec
-        sleep( 0.5 );
+        usleep(10000); // sleep for 0.01 sec
+        // sleep( 2 );
 
-        void *buffer = serialization(my_x, my_y, my_pix_y, my_pix_x, ident);
+        void *buffer = serialization(my_x, my_y, my_pix_y, my_pix_x, my_ident, data_n);
 
+        // void *buffer = serialization(my_x, my_y, my_pix_y, my_pix_x, my_ident);
         // printf("buffer %p\n", buffer);
         socklen_t len = sizeof(servaddr);
 
         ssize_t sended = sendto( sockfd, buffer, 1212, MSG_CONFIRM,
                                  (const struct sockaddr *) &servaddr,
                                  sizeof(servaddr) );
+        int dub_data_n = *data_n;
+        *data_n = dub_data_n + 1;
+
         if(-1 == sended) {
             printf("::udp_socket():: Error: Send datagramm\n");
             exit(EXIT_FAILURE);
@@ -256,6 +267,12 @@ void* udp_socket(void* data_array) {
                 /*копируем старые данные врага*/
                 int check_x_enemy = *x_enemy;
                 int check_y_enemy = *y_enemy;
+                int check_x_my;
+                int check_y_my;
+                int check_my_pix_x = *my_pix_x;
+                int check_my_pix_y = *my_pix_y;
+
+                int new_ident = *(int *)buffer;
 
 
                 // printf("\n my_x %d my_y %d\n", *my_x, *my_y);
@@ -264,27 +281,52 @@ void* udp_socket(void* data_array) {
                 // printf("\n");
 
                 /*десериализуем новые*/
-                deserialization(buffer, x_enemy,
-                                y_enemy, pix_x_enemy, pix_y_enemy);
 
+                if (new_ident == *my_ident) {
 
-                /*проверяем, не изменились ли координаты*/
-                if ( ( check_x_enemy != *x_enemy ) ||
-                     ( check_y_enemy != *y_enemy ) ) {
-                    /*если координаты изменились,
-                      то отрисовываем старые координаты фоном*/
-                    show_box(check_x_enemy, check_y_enemy,
-                             *pix_x_enemy, *pix_y_enemy, 0, 0, 0);
+                    // printf("before my_x %d my_y %d my_pix_x %d my_pix_y %d\n",
+                    //        *my_x, *my_y, *my_pix_x, *my_pix_y);
 
+                    deserialization(buffer, &check_x_my, &check_y_my,
+                                    my_pix_x, my_pix_y);
+
+                    if ( (check_my_pix_x != *my_pix_x ) ||
+                         (check_my_pix_y != *my_pix_y ) ) {
+
+                        printf("стороны изменились: \n");
+                        show_box(*my_x, *my_y,
+                                 check_my_pix_x, check_my_pix_y, 0, 0, 0);
+
+                        show_box(*my_x, *my_y,
+                                 *my_pix_x, *my_pix_y, 255, 255, 255);
+
+                        // printf("after my_x %d my_y %d my_pix_x %d my_pix_y %d\n",
+                        //        *my_x, *my_y, *my_pix_x, *my_pix_y);
+                        printf("\n");
+                        show_pixels();
+
+                    }
                 } else {
-                    /*затем отрисовываем */
-                    show_box(*x_enemy, *y_enemy, *pix_x_enemy, *pix_y_enemy, 255, 0, 0);
+                    deserialization(buffer, x_enemy,
+                                    y_enemy, pix_x_enemy, pix_y_enemy);
+
+                    show_pixels();
+                    /*проверяем, не изменились ли координаты*/
+                    if ( ( check_x_enemy != *x_enemy ) ||
+                         ( check_y_enemy != *y_enemy ) ) {
+                        /*если координаты изменились,
+                          то отрисовываем старые координаты фоном*/
+                        show_box(check_x_enemy, check_y_enemy,
+                                 *pix_x_enemy, *pix_y_enemy, 0, 0, 0);
+                        /*затем отрисовываем */
+                        show_box(*x_enemy, *y_enemy, *pix_x_enemy,
+                                 *pix_y_enemy, 255, 0, 0);
+                    }
                 }
             }
         }
     }
 }
-
 
 pthread_t udp_init(int** data_array) {
     // Создаем сокет.
@@ -318,9 +360,35 @@ pthread_t udp_init(int** data_array) {
     return udp_thread;
 }
 
-void* serialization(int* my_x, int* my_y, int* pix_y, int* pix_x, int* ident) {
+void show_pixels() {
+    pthread_mutex_lock(&show_pixels_mutex);
+
+    SDL_LockSurface(surface);
+
+    int x;
+    int y;
+    // printf("\n");
+    for(int i = 0; i < MAX_PIXELS; i++) {
+        if ( pixels[i].alive == 1 ) {
+            x = pixels[i].x;
+            y = pixels[i].y;
+            // printf("pixel x %d y %d\n", pixels[i].x, pixels[i].y);
+            DrawPixel(surface, x, y, 0, 255, 0);
+        } else {
+            DrawPixel(surface, x, y, 0, 0, 0);
+        }
+    }
+
+    SDL_UnlockSurface(surface);
+    SDL_UpdateWindowSurface(gWindow);
+    pthread_mutex_unlock(&show_pixels_mutex);
+}
+
+void* serialization(int* my_x, int* my_y, int* pix_y, int* pix_x,
+                    int* ident, int* data_n) {
+
     /*выделяем память под буфер*/
-    void * udp_buffer = malloc((sizeof(int) * 5) + sizeof(pixels));
+    void * udp_buffer = malloc((sizeof(int) * 6) + sizeof(pixels));
 
     // void * udp_buffer = malloc(sizeof(int) * 5);
 
@@ -331,6 +399,10 @@ void* serialization(int* my_x, int* my_y, int* pix_y, int* pix_x, int* ident) {
 
     /* сериализуем идентификатор квадратика */
     memcpy(udp_buffer, ident, sizeof(int));
+    udp_buffer += sizeof(int);
+
+    // сериализуем номер датаграммы
+    memcpy(udp_buffer, data_n, sizeof(int));
     udp_buffer += sizeof(int);
 
     /*сериализуем координаты квадратика и его размер*/
@@ -362,6 +434,10 @@ void deserialization (void * input, int* enemy_x, int* enemy_y,
     // printf("ident is %d\n", ident);
     buffer += sizeof(int);
 
+    // пропускаем номер датаграммы
+    int data_n = *(int *)buffer;
+    buffer += sizeof(int);
+
     /*десериализуем данные врага*/
     /* закрываем мьютекс здесь,
        т.к. это критическая секция кода*/
@@ -376,33 +452,31 @@ void deserialization (void * input, int* enemy_x, int* enemy_y,
     buffer += sizeof(int);
     *enemy_pix_x = *(int *)buffer;
     buffer += sizeof(int);
-
     // printf("\n x_enemy %d y_enemy %d\n", *enemy_x, *enemy_y);
     // printf("\n pix_x_enemy %d  pix_y_enemy %d\n", *enemy_pix_x,  *enemy_pix_y);
     // printf("\n");
 
-    /* int j = 0; */
-    /* /\* десериализуем пиксели *\/ */
+    int j = 0;
+    // десериализуем пиксели
 
-    /* while (j <=99) { */
-    /*     //printf("..........\n"); */
-    /*     pixels[j].alive = *(char *)buffer; */
-    /*     buffer += sizeof(char); */
-    /*     //printf("buffer in %d iteration is %X\n", j, buffer); */
-    /*     pixels[j].c = *(int *)buffer; */
-    /*     buffer += sizeof(int); */
-    /*     //printf("buffer in %d iteration is %X\n", j, buffer); */
-    /*     pixels[j].d = *(int *)buffer; */
-    /*     buffer += sizeof(int); */
-    /*     //printf("buffer in %d iteration is %X\n", j, buffer); */
-    /*     j++; */
-    /* } */
+    while (j < MAX_PIXELS) {
+        //printf("..........\n");
+        pixels[j].alive = *(int *)buffer;
+        buffer += sizeof(int);
+        //printf("buffer in %d iteration is %X\n", j, buffer);
+        pixels[j].x = *(int *)buffer;
+        buffer += sizeof(int);
+        //printf("buffer in %d iteration is %X\n", j, buffer);
+        pixels[j].y = *(int *)buffer;
+        buffer += sizeof(int);
+        //printf("buffer in %d iteration is %X\n", j, buffer);
+        j++;
+    }
 
     /* откываем мьютекс после выхода из цикла*/
     pthread_mutex_unlock(&mutex);
     /* освобождаем место в памяти */
     free(buffer_begin);
-
 }
 
 void Handle_Keydown(SDL_Keysym* keysym, int* x, int* y, int* pix_x, int* pix_y) {
@@ -551,11 +625,11 @@ int main() {
 
         /* создаем мьютекс */
         mutex = PTHREAD_MUTEX_INITIALIZER;
-
+        show_pixels_mutex = PTHREAD_MUTEX_INITIALIZER;
         /* создаем сокет */
+
         udp_init( data_array );
         // printf("инициализация udp прошла успешно\n");
-
 
         while (256 != event.type) {
             SDL_WaitEventTimeout(&event, 100);

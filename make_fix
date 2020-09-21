@@ -21,8 +21,8 @@ INC = inc
 
 VPATH = make:sdl
 
-CFLAGS  += -m32 -g
-LDFLAGS += -m32 -g
+CFLAGS  += -m64 -g
+LDFLAGS += -m64 -g
 
 CFLAGS  += $(shell pkg-config --cflags  sdl2  -lpthread)
 LDFLAGS += $(shell pkg-config --libs    sdl2	lpthread)

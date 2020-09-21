@@ -28,10 +28,7 @@
 #define MAX_CLIENTS 2
 
 /* максимальный размер датаграммы */
-#define MAXLINE  1220
-
-/* объявляем промежуточный буфер */
-char buffer[MAXLINE];
+#define MAXLINE  1500
 
 /* sockaddr_in сервера */
 struct sockaddr_in servaddr;
@@ -70,29 +67,38 @@ int PixelArray (void *p_pixels) {
     /* счетчик цикла, объявляется вне цикла, чтобы проанализировать
        пройден ли весь массив */
     int i;
+    int a;
+    int b;
 
+    FILE *fp;
+
+    if ((fp = fopen("log.txt", "w")) == NULL) {
+        printf("Не удалось открыть файл\n");
+
+    }
     /* printf("\n"); */
     for (i = 0; i < MAX_PIXELS; i++) {
-        if (0 == pixels[i].alive) {
-            /*сгенерируем пиксели */
-            int a;
-            int b;
-        generate_new_pixel:
+        if ( pixels[i].alive == 0 ) {
 
             a = rand() % MAX_SIZE_X;
             b = rand() % MAX_SIZE_Y;
 
-            if ( ( pixels[i].x == a) && (pixels[i].y == b) ) {
-                goto generate_new_pixel;
-            }
+            if ( ( pixels[i].x != a ) && (pixels[i].y != b ) ) {
 
-            pixels[i].x = a;
-            pixels[i].y = b;
-            pixels[i].alive = 1;
-            /* printf("pixel x %d y %d\n", pixels[i].x, pixels[i].y); */
+                pixels[i].x = a;
+                pixels[i].y = b;
+                pixels[i].alive = 1;
+                fprintf (fp,"generate i %d: pixel x %d y %d\n", i,
+                         pixels[i].x, pixels[i].y );
+                fflush(fp);
+
+                /* printf("\n"); */
+                /* fflush(stdout); */
+
+            }
         }
     }
-
+    fclose(fp);
     /* Если после окончания цикла i равен максимальному значению
        переменной цикла - значит весь массив перебрали,
        но не нашли свободной структуры */
@@ -149,7 +155,7 @@ void * serialization(char * input, int* x, int* y, int* x_side, int* y_side) {
     pnt += sizeof(int);
 
     // дополняем данными пикселей
-    for (int i = 0; i <=99; i++) {
+    for (int i = 0; i < MAX_PIXELS; i++) {
 
         *(int*)pnt = pixels[i].alive;
         pnt += sizeof(int);
@@ -157,7 +163,12 @@ void * serialization(char * input, int* x, int* y, int* x_side, int* y_side) {
         pnt += sizeof(int);
         *(int*)pnt = pixels[i].y;
         pnt += sizeof(int);
+        printf ("serialization %d: pixel x %d y %d alive %d\n", i,
+                pixels[i].x, pixels[i].y,  pixels[i].alive);
+        fflush(stdout);
+
     }
+    printf("\n");
     return pointer;
 }
 
@@ -175,8 +186,10 @@ void * counter (char * input, int* numpix) {
     /*десериализуем данные*/
     deserialization(buffer, &x, &y, &x_side, &y_side);
 
-    /* printf("\n before: x %d\n y %d\n x_side %d\n y_side %d\n", */
+    /* printf("данные десериализованны:  \n"); */
+    /* printf("\n x %d y %d x_side %d y_side %d\n", */
     /*        x, y, x_side, y_side); */
+    /* printf("\n"); */
     /* fflush(stdout); */
 
     for (int i = 0; i < MAX_PIXELS; i++) {
@@ -189,11 +202,10 @@ void * counter (char * input, int* numpix) {
             /*то мы объявляем его как съеденный*/
             pixels[i].alive = 0;
 
-            printf("\n x %d y %d x_side %d y_side %d\n",
-                   x, y, x_side, y_side);
-            printf("\n pixel x %d pixel y %d\n",
-                   pixels[i].x, pixels[i].y);
-            printf("\n");
+
+            /* printf("\n pixel x %d pixel y %d\n", */
+            /*        pixels[i].x, pixels[i].y); */
+            /* printf("\n"); */
 
             /*увеличиваем счетчик съеденных пикселей*/
             *numpix = eatten_pix + 1;
@@ -202,7 +214,7 @@ void * counter (char * input, int* numpix) {
             printf("numpix %d\n", *numpix);
             /*на каждом третьем пикселе квадрат увеличивается
               Пора увеличить?*/
-            int result =  eatten_pix % 3;
+            int result = eatten_pix % 3;
 
             if (result == 0) {
                 /* printf("увеличить\n"); */
@@ -210,10 +222,9 @@ void * counter (char * input, int* numpix) {
                 x_side++;
                 y_side++;
 
-                printf("\n x_side %d y_side %d\n",
-                       x, y, x_side, y_side);
+                /* printf("\n x_side %d y_side %d\n", x_side, y_side); */
 
-                printf("\n");
+                /* printf("\n"); */
             }
         }
     }
@@ -223,6 +234,18 @@ void * counter (char * input, int* numpix) {
 
     /*сериализуем обратно*/
     void * pnt = serialization(p, &x, &y, &x_side, &y_side);
+
+    x = 0;
+    y = 0;
+    x_side = 0;
+    y_side = 0;
+
+    deserialization(buffer, &x, &y, &x_side, &y_side);
+    /* printf("данные сериализованны:  \n"); */
+    /* printf("\n x %d y %d x_side %d y_side %d", */
+    /*        x, y, x_side, y_side); */
+    /* printf("\n"); */
+    /* fflush(stdout); */
 
     return pnt;
 }
@@ -250,11 +273,12 @@ void* send_data(void* buf_pointer) {
                 /* то получаем указатель на его буфер */
                 char *cur_client_buf = clients[i].buf;
                 /* printf("cur_client_buf %p \n", cur_client_buf); */
-                cur_client_buf = (char*)counter(cur_client_buf, numpix);
+                counter(cur_client_buf, numpix);
+
                 /* printf("cur_client_buf %p \n", cur_client_buf); */
                 /* printf("отправляю пакет от клиента %d к клиенту %d\n", */
                 /*        ident, clients[i].ident); */
-
+                /* fflush(stdout); */
                 /* printf("\n"); */
                 int num =  sendto(sockfd, cur_client_buf, MAXLINE,
                                   MSG_CONFIRM,
@@ -313,13 +337,12 @@ void generate_pixels() {
 
     void* pixels = pixels;
     PixelArray(pixels);
-
 }
 
 void get_data_and_register_client() {
 
     int cnt = 0;
-
+    char buffer[MAXLINE];
     while (1) {
 
         /* Создаем новые пиксели еды если есть возможность */
@@ -333,68 +356,69 @@ void get_data_and_register_client() {
 
         /* Разбираем датаграмму и пересылаем изменения остальным клиентам */
 
-        /* вытаскиваем идентификатор и номер датаграммы */
-        char* input = buffer;
+        if (n != -1) {
+            /* вытаскиваем идентификатор и номер датаграммы */
+            char* input = buffer;
 
-        int ident_client = *(int *)input;
-        input += sizeof(int);
-        int data_n = *(int *)input;
+            int ident_client = *(int *)input;
+            input += sizeof(int);
+            int data_n = *(int *)input;
 
-        for(int i = 0; i < MAX_CLIENTS; i++) {
+            for(int i = 0; i < MAX_CLIENTS; i++) {
 
-            /*если идентификатор совпадает - клиент уже зарегестрирован*/
-            /* просто обновляем его данные  */
-            if( ( clients[i].ident == ident_client ) &&
-                ( clients[i].data_n < data_n ) ) {
+                /*если идентификатор совпадает - клиент уже зарегестрирован*/
+                /* просто обновляем его данные  */
+                if( ( clients[i].ident == ident_client ) &&
+                    ( clients[i].data_n < data_n ) ) {
 
-                char *buf_pointer = clients[i].buf;
-                memcpy(buf_pointer, buffer, MAXLINE);
-                clients[i].buf = buf_pointer;
-                break;
+                    char *buf_pointer = clients[i].buf;
+                    memcpy(buf_pointer, buffer, MAXLINE);
+                    clients[i].buf = buf_pointer;
+                    break;
 
-            } else if ( clients[i].ident == 0 ) {
+                } else if ( clients[i].ident == 0 ) {
 
-                struct connection new_client_connect = clients[i];
-                /* выделяем память под буфер и перезаписываем туда данные */
-                char *new_client_buf = malloc(MAXLINE);
-                memcpy(new_client_buf, buffer, MAXLINE);
+                    struct connection new_client_connect = clients[i];
+                    /* выделяем память под буфер и перезаписываем туда данные */
+                    char *new_client_buf = malloc(MAXLINE);
+                    memcpy(new_client_buf, buffer, MAXLINE);
 
-                /* записали идентификатор, адрес буфера и номер датаграммы*/
-                new_client_connect.buf = new_client_buf;
-                new_client_connect.ident = ident_client;
-                new_client_connect.data_n = data_n;
+                    /* записали идентификатор, адрес буфера и номер датаграммы*/
+                    new_client_connect.buf = new_client_buf;
+                    new_client_connect.ident = ident_client;
+                    new_client_connect.data_n = data_n;
 
-                /* создаем поток и записываем его идентификатор в стуктуру*/
-                /* переменная для хранения идентификатора потока */
-                /* копируем данные структуру клиента в массив */
-                new_client_connect.sockaddr_p = (struct sockaddr_in *)malloc(sizeof
-                                                                             (cliaddr)
-                                                                             );
-                memcpy(new_client_connect.sockaddr_p, &cliaddr, (sizeof(cliaddr)));
+                    /* создаем поток и записываем его идентификатор в стуктуру*/
+                    new_client_connect.sockaddr_p = (struct sockaddr_in *)malloc(sizeof
+                                                                                 (cliaddr)
+                                                                                 );
+                    memcpy(new_client_connect.sockaddr_p, &cliaddr, (sizeof(cliaddr)));
 
-                /* printf("new_client_connect.sockaddr_p %p\n", */
-                /*        new_client_connect.sockaddr_p); */
-                /* printf("new_client_connect.ident %d\n", new_client_connect.ident); */
-                /* printf("\n"); */
-                /* fflush(stdout); */
+                    /* printf("new_client_connect.sockaddr_p %p\n", */
+                    /*        new_client_connect.sockaddr_p); */
+                    /* printf("new_client_connect.ident %d\n", new_client_connect.ident); */
+                    /* printf("\n"); */
+                    /* fflush(stdout); */
 
-                pthread_t udp_thread;
-                pthread_create(&udp_thread, NULL,
-                               send_data, (void*)buffer);
+                    pthread_t udp_thread;
+                    pthread_create(&udp_thread, NULL,
+                                   send_data, (void*)buffer);
 
-                new_client_connect.thread = udp_thread;
-                clients[i] = new_client_connect;
+                    new_client_connect.thread = udp_thread;
 
-                /* printf("clients[i].sockaddr_p is %p\n", clients[i].sockaddr_p); */
-                /* printf("clients[i].ident is %d\n", clients[i].ident); */
-                /* printf("\n"); */
-                /* fflush(stdout); */
-                break;
+                    /* копируем данные структуру клиента в массив */
+                    clients[i] = new_client_connect;
+
+                    /* printf("clients[i].sockaddr_p is %p\n", clients[i].sockaddr_p); */
+                    /* printf("clients[i].ident is %d\n", clients[i].ident); */
+                    /* printf("\n"); */
+                    /* fflush(stdout); */
+                    break;
+                }
             }
         }
     }
 }
-
 int main(){
     init_socket();
     memset(clients, 0, sizeof(clients));

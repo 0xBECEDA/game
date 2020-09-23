@@ -70,12 +70,6 @@ int PixelArray (void *p_pixels) {
     int a;
     int b;
 
-    FILE *fp;
-
-    if ((fp = fopen("log.txt", "w")) == NULL) {
-        printf("Не удалось открыть файл\n");
-
-    }
     /* printf("\n"); */
     for (i = 0; i < MAX_PIXELS; i++) {
         if ( pixels[i].alive == 0 ) {
@@ -88,17 +82,10 @@ int PixelArray (void *p_pixels) {
                 pixels[i].x = a;
                 pixels[i].y = b;
                 pixels[i].alive = 1;
-                fprintf (fp,"generate i %d: pixel x %d y %d\n", i,
-                         pixels[i].x, pixels[i].y );
-                fflush(fp);
-
-                /* printf("\n"); */
-                /* fflush(stdout); */
 
             }
         }
     }
-    fclose(fp);
     /* Если после окончания цикла i равен максимальному значению
        переменной цикла - значит весь массив перебрали,
        но не нашли свободной структуры */
@@ -163,12 +150,14 @@ void * serialization(char * input, int* x, int* y, int* x_side, int* y_side) {
         pnt += sizeof(int);
         *(int*)pnt = pixels[i].y;
         pnt += sizeof(int);
-        printf ("serialization %d: pixel x %d y %d alive %d\n", i,
-                pixels[i].x, pixels[i].y,  pixels[i].alive);
-        fflush(stdout);
+        /* printf ("serialization %d: pixel x %d y %d alive %d\n", i, */
+        /*         pixels[i].x, pixels[i].y,  pixels[i].alive); */
+        /* fflush(stdout); */
 
     }
-    printf("\n");
+    /* printf("\n"); */
+    /* fflush(stdout); */
+
     return pointer;
 }
 
@@ -280,6 +269,21 @@ void* send_data(void* buf_pointer) {
                 /*        ident, clients[i].ident); */
                 /* fflush(stdout); */
                 /* printf("\n"); */
+
+                void* test_buffer = (void*)cur_client_buf;
+                test_buffer += sizeof(int) * 6;
+                int first_p_alive = *(int*)test_buffer;
+                test_buffer += sizeof(int);
+                int first_p_x = *(int*)test_buffer;
+                test_buffer += sizeof(int);
+                int first_p_y = *(int*)test_buffer;
+                test_buffer += sizeof(int);
+
+                printf("данные первого пикселя1 x %d, y %d, alive %d\n",
+                       first_p_x,  first_p_y,  first_p_alive);
+                printf("\n");
+                fflush(stdout);
+
                 int num =  sendto(sockfd, cur_client_buf, MAXLINE,
                                   MSG_CONFIRM,
                                   (struct sockaddr *)clients[i].sockaddr_p,
@@ -293,7 +297,6 @@ void* send_data(void* buf_pointer) {
                         clients[i].ident != 0 ) {
 
                         /*дополняем буфер данными*/
-
                         /* printf("отправляю пакет от клиента %d к клиенту %d\n", */
                         /*        ident, clients[i].ident); */
                         /* printf("\n"); */
@@ -341,9 +344,10 @@ void generate_pixels() {
 
 void get_data_and_register_client() {
 
-    int cnt = 0;
     char buffer[MAXLINE];
     while (1) {
+
+        int cnt_clients = 0;
 
         /* Создаем новые пиксели еды если есть возможность */
         generate_pixels();
@@ -362,22 +366,32 @@ void get_data_and_register_client() {
 
             int ident_client = *(int *)input;
             input += sizeof(int);
+            /* printf("ident %d\n", ident_client); */
             int data_n = *(int *)input;
 
+            /* printf("data_n %d\n", data_n); */
             for(int i = 0; i < MAX_CLIENTS; i++) {
 
                 /*если идентификатор совпадает - клиент уже зарегестрирован*/
                 /* просто обновляем его данные  */
-                if( ( clients[i].ident == ident_client ) &&
-                    ( clients[i].data_n < data_n ) ) {
+                if ( clients[i].ident == ident_client ) {
+                    if ( clients[i].data_n < data_n ) {
+
+                    /* printf("i %d\n", i); */
 
                     char *buf_pointer = clients[i].buf;
                     memcpy(buf_pointer, buffer, MAXLINE);
                     clients[i].buf = buf_pointer;
-                    break;
+                    cnt_clients++;
 
-                } else if ( clients[i].ident == 0 ) {
+                    }
+                } else if ( ( clients[i].ident == 0 ) &&
+                            ( cnt_clients == 0 )         ) {
 
+                    /* printf("i %d\n", i); */
+
+                    /* printf("Новый!\n"); */
+                    fflush(stdout);
                     struct connection new_client_connect = clients[i];
                     /* выделяем память под буфер и перезаписываем туда данные */
                     char *new_client_buf = malloc(MAXLINE);
@@ -419,6 +433,7 @@ void get_data_and_register_client() {
         }
     }
 }
+
 int main(){
     init_socket();
     memset(clients, 0, sizeof(clients));

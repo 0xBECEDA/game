@@ -1,6 +1,6 @@
 #OBJS specifies which files to compile as part of the project
-OBJS = game_fix.cpp
-OBJ = game_server_fix.c
+OBJS = game_test.cpp
+OBJ = game_server.c
 ASMOBJS = game.S
 #CC specifies which compiler we're using
 CC = gcc
@@ -21,14 +21,15 @@ INC = inc
 
 VPATH = make:sdl
 
-CFLAGS  += -m64 -g
-LDFLAGS += -m64 -g
+CFLAGS  += -m32 -g
+LDFLAGS += -m32 -g
 
 CFLAGS  += $(shell pkg-config --cflags  sdl2  -lpthread)
 LDFLAGS += $(shell pkg-config --libs    sdl2	lpthread)
 
 all : $(OBJS)
 	$(CC) $(OBJS) $(COMPILER_FLAGS) $(LINKER_FLAGS) $(LIB) -o $(OBJS_NAME)
+	$(CC) $(OBJ) $(COMPILER_FLAGS) $(LINKER_FLAGS) $(LIB) -o $(OBJ_NAME)
 asm : $(OBJS)
 	$(CC) $(OBJS) $(COMPILER_FLAGS) -S $(LINKER_FLAGS) $(CFLAGS) `pkg-config --cflags --libs sdl2` -o $(OBJ_NAME).S
 sdlwrap.o: sdlwrap.c

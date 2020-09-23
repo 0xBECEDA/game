@@ -36,6 +36,13 @@ struct pixel {
     int y;
 } pixels[MAX_PIXELS];
 
+
+// struct pixel {
+//     int alive = 0;
+//     int x;
+//     int y;
+// };
+
 /* объявление мьютекса */
 pthread_mutex_t show_pixels_mutex;
 
@@ -239,7 +246,7 @@ void* serialization(int* my_x, int* my_y, int* pix_y, int* pix_x,
 void deserialization (void * input, int* enemy_x, int* enemy_y,
                       int* enemy_pix_y, int* enemy_pix_x) {
 
-    printf("десериализация\n");
+    // printf("десериализация\n");
     void * buffer_begin = input;
 
     /*сохраняем неизмененный указатель*/
@@ -270,7 +277,8 @@ void deserialization (void * input, int* enemy_x, int* enemy_y,
     buffer += sizeof(int);
     printf("\n x_enemy %d y_enemy %d\n", *enemy_x, *enemy_y);
     printf("\n pix_x_enemy %d  pix_y_enemy %d\n", *enemy_pix_x,  *enemy_pix_y);
-    printf("\n pixel x %d\n ", *(int *)buffer);
+    // printf("\n pixel x %d\n ", *(int *)buffer);
+    fflush(stdout);
     printf("\n");
 
     int j = 0;
@@ -290,6 +298,8 @@ void deserialization (void * input, int* enemy_x, int* enemy_y,
     }
 
     printf("\n");
+    fflush(stdout);
+
     /* откываем мьютекс после выхода из цикла*/
     pthread_mutex_unlock(&mutex);
     /* освобождаем место в памяти */
@@ -436,7 +446,9 @@ void send_data(int* my_x, int* my_y,
                              sizeof(servaddr) );
 
     int dub_data_n = *data_n;
-    *data_n = dub_data_n++;;
+    *data_n = dub_data_n + 1;
+
+    printf(" send_data: data_n %d \n", *data_n);
 
     if ( sended == -1 ) {
 
@@ -454,9 +466,9 @@ void receive_data(int* my_x, int* my_y, int* my_pix_y, int* my_pix_x,
                   int* my_ident, int* x_enemy, int* y_enemy,
                   int* pix_x_enemy, int* pix_y_enemy) {
 
-    begin:
+ begin:
     int buf_size = (sizeof(pixel) * 100 + sizeof(int) * 6);
-    void*  received_buffer = malloc( buf_size );
+    void* received_buffer = malloc( buf_size );
 
     socklen_t len = sizeof(servaddr);
 
@@ -464,16 +476,44 @@ void receive_data(int* my_x, int* my_y, int* my_pix_y, int* my_pix_x,
     ssize_t received = recvfrom( sockfd, received_buffer, buf_size, MSG_WAITALL,
                                  (struct sockaddr *) &servaddr,
                                  (socklen_t *)&len );
+
+    void* test_buffer = received_buffer;
+    test_buffer += sizeof(int) * 6;
+    int first_p_alive = *(int*)test_buffer;
+    test_buffer += sizeof(int);
+    int first_p_x = *(int*)test_buffer;
+    test_buffer += sizeof(int);
+    int first_p_y = *(int*)test_buffer;
+    test_buffer += sizeof(int);
+
+    printf("данные первого пикселя1 x %d, y %d, alive %d\n",
+           first_p_x,  first_p_y,  first_p_alive);
+
     if ( received == -1 ) {
         // ждем пакеты
         free(received_buffer);
         goto begin;
 
     } else {
-    // если все хорошо, обновляем данные
-    update_data( received_buffer, my_x, my_y, my_pix_y, my_pix_x, my_ident,
-                 x_enemy, y_enemy,
-                 pix_x_enemy, pix_y_enemy );
+        printf("пакет принят\n");
+        fflush(stdout);
+
+        // void* test_buffer = received_buffer;
+        // test_buffer += sizeof(int) * 6;
+        // int first_p_alive = *(int*)test_buffer;
+        // test_buffer += sizeof(int);
+        // int first_p_x = *(int*)test_buffer;
+        // test_buffer += sizeof(int);
+        // int first_p_y = *(int*)test_buffer;
+        // test_buffer += sizeof(int);
+
+        // printf("данные первого пикселя2 x %d, y %d, alive %d\n",
+        //        first_p_x,  first_p_y,  first_p_alive);
+
+        // если все хорошо, обновляем данные
+        update_data( received_buffer, my_x, my_y, my_pix_y, my_pix_x, my_ident,
+                     x_enemy, y_enemy,
+                     pix_x_enemy, pix_y_enemy );
 
     }
 }
@@ -482,9 +522,9 @@ void show_pixels() {
     pthread_mutex_lock(&show_pixels_mutex);
 
     SDL_LockSurface(surface);
-    // printf("пиксели начали отрисовываться :\n");
-    // printf("\n");
-    // fflush(stdout);
+    printf("пиксели начали отрисовываться :\n");
+    printf("\n");
+    fflush(stdout);
 
     int x;
     int y;
@@ -493,12 +533,12 @@ void show_pixels() {
         if ( pixels[i].alive == 1 ) {
             x = pixels[i].x;
             y = pixels[i].y;
-            // printf("i %d: pixel x %d y %d\n", i,  pixels[i].x, pixels[i].y);
-            // fflush(stdout);
+            printf("i %d: pixel x %d y %d\n", i,  pixels[i].x, pixels[i].y);
+            fflush(stdout);
             DrawPixel(surface, x, y, 0, 255, 0);
         } else {
-            // printf("i %d: pixel x %d y %d\n", i,  pixels[i].x, pixels[i].y);
-            // fflush(stdout);
+            printf("i %d: pixel x %d y %d\n", i,  pixels[i].x, pixels[i].y);
+            fflush(stdout);
             DrawPixel(surface, x, y, 0, 0, 0);
         }
     }
@@ -511,6 +551,9 @@ void show_pixels() {
 void update_data(void* received_buffer, int* my_x, int* my_y, int* my_pix_y,
                  int* my_pix_x, int* my_ident, int* x_enemy, int* y_enemy,
                  int* pix_x_enemy, int* pix_y_enemy) {
+
+    printf("обновление данных\n");
+    fflush(stdout);
 
     // заводим переменные под дубликаты данных
     int* double_x_enemy = (int*)malloc(sizeof(int));
@@ -537,6 +580,9 @@ void update_data(void* received_buffer, int* my_x, int* my_y, int* my_pix_y,
 
     // пришел пакет с нашими же данными?
     if ( *new_ident == *my_ident ) {
+
+        printf("пришли собственные данные\n");
+        fflush(stdout);
 
         deserialization( received_buffer, double_my_x, double_my_y,
                          double_my_pix_x, double_my_pix_y );
@@ -619,6 +665,7 @@ void* udp_socket(void* data_array) {
         // отправка сообщения
         send_data( my_x, my_y, my_pix_y, my_pix_x, my_ident, data_n );
 
+        printf("data_n %d \n", *data_n);
         printf("цикл: пакет отправлен\n");
 
         // usleep(50000);
@@ -722,6 +769,13 @@ void init_mutex() {
     show_pixels_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 }
+// struct pixel* make_pixel_array() {
+//     int size =  sizeof(pixel) * MAX_PIXELS;
+//     struct pixel* array = (struct pixel*)malloc(size);
+//     memset(array, pixel, size);
+//     return array;
+// }
+
 int main() {
 
     // printf("game main\n");
@@ -738,6 +792,7 @@ int main() {
     } else {
 
         int** data_array = init_values_and_box();
+        memset(pixels, 0, sizeof(pixels));
         udp_init( data_array );
         init_mutex();
         driver_loop( data_array );

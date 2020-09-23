@@ -1,6 +1,6 @@
 #OBJS specifies which files to compile as part of the project
-OBJS = game_test.cpp
-OBJ = game_server.c
+OBJS = game_client.cpp
+OBJ = game_new_server.c
 ASMOBJS = game.S
 #CC specifies which compiler we're using
 CC = gcc
